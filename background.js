@@ -397,6 +397,58 @@ async function humanStepDelay(min = HUMAN_STEP_DELAY_MIN, max = HUMAN_STEP_DELAY
   await sleepWithStop(duration);
 }
 
+async function clickWithDebugger(tabId, rect) {
+  if (!tabId) {
+    throw new Error('No auth tab found for debugger click.');
+  }
+  if (!rect || !Number.isFinite(rect.centerX) || !Number.isFinite(rect.centerY)) {
+    throw new Error('Step 8 debugger fallback needs a valid button position.');
+  }
+
+  const target = { tabId };
+  try {
+    await chrome.debugger.attach(target, '1.3');
+  } catch (err) {
+    throw new Error(
+      `Debugger attach failed during step 8 fallback: ${err.message}. ` +
+      'If DevTools is open on the auth tab, close it and retry.'
+    );
+  }
+
+  try {
+    const x = Math.round(rect.centerX);
+    const y = Math.round(rect.centerY);
+
+    await chrome.debugger.sendCommand(target, 'Page.bringToFront');
+    await chrome.debugger.sendCommand(target, 'Input.dispatchMouseEvent', {
+      type: 'mouseMoved',
+      x,
+      y,
+      button: 'none',
+      buttons: 0,
+      clickCount: 0,
+    });
+    await chrome.debugger.sendCommand(target, 'Input.dispatchMouseEvent', {
+      type: 'mousePressed',
+      x,
+      y,
+      button: 'left',
+      buttons: 1,
+      clickCount: 1,
+    });
+    await chrome.debugger.sendCommand(target, 'Input.dispatchMouseEvent', {
+      type: 'mouseReleased',
+      x,
+      y,
+      button: 'left',
+      buttons: 0,
+      clickCount: 1,
+    });
+  } finally {
+    await chrome.debugger.detach(target).catch(() => {});
+  }
+}
+
 async function broadcastStopToContentScripts() {
   const registry = await getTabRegistry();
   for (const entry of Object.values(registry)) {
@@ -1119,7 +1171,7 @@ async function executeStep7(state) {
 }
 
 // ============================================================
-// Step 8: Complete OAuth (manual click + localhost listener)
+// Step 8: Complete OAuth (auto click + localhost listener)
 // ============================================================
 
 let webNavListener = null;
@@ -1129,26 +1181,35 @@ async function executeStep8(state) {
     throw new Error('No OAuth URL. Complete step 1 first.');
   }
 
-  await addLog('Step 8: Setting up localhost redirect listener for manual confirmation...');
+  await addLog('Step 8: Setting up localhost redirect listener...');
 
   // Register webNavigation listener (scoped to this step)
   return new Promise((resolve, reject) => {
-    const timeout = setTimeout(() => {
+    let resolved = false;
+    let resolveCaptureWait = null;
+    const captureWait = new Promise((resolveCapture) => {
+      resolveCaptureWait = resolveCapture;
+    });
+
+    const cleanupListener = () => {
       if (webNavListener) {
         chrome.webNavigation.onBeforeNavigate.removeListener(webNavListener);
         webNavListener = null;
       }
-      setStepStatus(8, 'failed');
-      addLog('Step 8: Localhost redirect not captured after 120s. Please confirm you clicked "继续" on the OAuth page.', 'error');
-      reject(new Error('Localhost redirect not captured after 120s. Please click "继续" on the OAuth page.'));
+    };
+
+    const timeout = setTimeout(() => {
+      cleanupListener();
+      reject(new Error('Localhost redirect not captured after 120s. Step 8 click may have been blocked.'));
     }, 120000);
 
     webNavListener = (details) => {
       if (details.url.startsWith('http://localhost')) {
         console.log(LOG_PREFIX, `Captured localhost redirect: ${details.url}`);
-        chrome.webNavigation.onBeforeNavigate.removeListener(webNavListener);
-        webNavListener = null;
+        resolved = true;
+        cleanupListener();
         clearTimeout(timeout);
+        if (resolveCaptureWait) resolveCaptureWait(details.url);
 
         setState({ localhostUrl: details.url }).then(() => {
           addLog(`Step 8: Captured localhost URL: ${details.url}`, 'ok');
@@ -1163,23 +1224,36 @@ async function executeStep8(state) {
     chrome.webNavigation.onBeforeNavigate.addListener(webNavListener);
 
     // After step 7, the auth page shows a consent screen ("使用 ChatGPT 登录到 Codex")
-    // with a "继续" button. The user must click it manually.
+    // with a "继续" button. We locate the button in-page, then click it through
+    // the debugger Input API directly.
     (async () => {
       try {
-        const signupTabId = await getTabId('signup-page');
+        let signupTabId = await getTabId('signup-page');
         if (signupTabId) {
           await chrome.tabs.update(signupTabId, { active: true });
-          await addLog('Step 8: Switched to auth page. Please click "继续" manually to complete OAuth.', 'warn');
+          await addLog('Step 8: Switched to auth page. Preparing debugger click...');
         } else {
-          await reuseOrCreateTab('signup-page', state.oauthUrl);
-          await addLog('Step 8: Auth tab reopened. Please click "继续" manually to complete OAuth.', 'warn');
+          signupTabId = await reuseOrCreateTab('signup-page', state.oauthUrl);
+          await addLog('Step 8: Auth tab reopened. Preparing debugger click...');
+        }
+
+        const clickResult = await sendToContentScript('signup-page', {
+          type: 'STEP8_FIND_AND_CLICK',
+          source: 'background',
+          payload: {},
+        });
+
+        if (clickResult?.error) {
+          throw new Error(clickResult.error);
+        }
+
+        if (!resolved) {
+          await clickWithDebugger(signupTabId, clickResult?.rect);
+          await addLog('Step 8: Debugger click dispatched, waiting for redirect...');
         }
       } catch (err) {
         clearTimeout(timeout);
-        if (webNavListener) {
-          chrome.webNavigation.onBeforeNavigate.removeListener(webNavListener);
-          webNavListener = null;
-        }
+        cleanupListener();
         reject(err);
       }
     })();

@@ -5,16 +5,23 @@ console.log('[MultiPage:signup-page] Content script loaded on', location.href);
 
 // Listen for commands from Background
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
-  if (message.type === 'EXECUTE_STEP' || message.type === 'FILL_CODE') {
+  if (message.type === 'EXECUTE_STEP' || message.type === 'FILL_CODE' || message.type === 'STEP8_FIND_AND_CLICK') {
     resetStopState();
-    handleCommand(message).then(() => {
-      sendResponse({ ok: true });
+    handleCommand(message).then((result) => {
+      sendResponse({ ok: true, ...(result || {}) });
     }).catch(err => {
       if (isStopError(err)) {
-        log(`Step ${message.step}: Stopped by user.`, 'warn');
+        log(`Step ${message.step || 8}: Stopped by user.`, 'warn');
         sendResponse({ stopped: true, error: err.message });
         return;
       }
+
+      if (message.type === 'STEP8_FIND_AND_CLICK') {
+        log(`Step 8: ${err.message}`, 'error');
+        sendResponse({ error: err.message });
+        return;
+      }
+
       reportError(message.step, err.message);
       sendResponse({ error: err.message });
     });
@@ -30,12 +37,14 @@ async function handleCommand(message) {
         case 3: return await step3_fillEmailPassword(message.payload);
         case 5: return await step5_fillNameBirthday(message.payload);
         case 6: return await step6_login(message.payload);
-        case 8: return await step8_clickContinue();
+        case 8: return await step8_findAndClick();
         default: throw new Error(`signup-page.js does not handle step ${message.step}`);
       }
     case 'FILL_CODE':
       // Step 4 = signup code, Step 7 = login code (same handler)
       return await fillVerificationCode(message.step, message.payload);
+    case 'STEP8_FIND_AND_CLICK':
+      return await step8_findAndClick();
   }
 }
 
@@ -255,35 +264,77 @@ async function step6_login(payload) {
 }
 
 // ============================================================
-// Step 8: Focus "继续" on OAuth consent page for manual click
+// Step 8: Find "继续" on OAuth consent page for debugger click
 // ============================================================
 // After login + verification, page shows:
 // "使用 ChatGPT 登录到 Codex" with a "继续" submit button.
-// We only locate and focus it so the user can click manually.
+// Background performs the actual click through the debugger Input API.
 
-async function step8_clickContinue() {
-  log('Step 8: Looking for OAuth consent "继续" button for manual click...');
+async function step8_findAndClick() {
+  log('Step 8: Looking for OAuth consent "继续" button...');
 
-  // Wait for the consent page to be ready
-  // Look for the submit button with text "继续" or data-dd-action-name="Continue"
-  let continueBtn = null;
+  const continueBtn = await findContinueButton();
+  await waitForButtonEnabled(continueBtn);
+
+  await humanPause(350, 900);
+  continueBtn.scrollIntoView({ behavior: 'smooth', block: 'center' });
+  continueBtn.focus();
+  await sleep(250);
+
+  const rect = getSerializableRect(continueBtn);
+  log('Step 8: Found "继续" button and prepared debugger click coordinates.');
+  return {
+    rect,
+    buttonText: (continueBtn.textContent || '').trim(),
+    url: location.href,
+  };
+}
+
+async function findContinueButton() {
   try {
-    continueBtn = await waitForElement(
+    return await waitForElement(
       'button[type="submit"][data-dd-action-name="Continue"], button[type="submit"]._primary_3rdp0_107',
       10000
     );
   } catch {
     try {
-      continueBtn = await waitForElementByText('button', /继续|Continue/, 5000);
+      return await waitForElementByText('button', /继续|Continue/, 5000);
     } catch {
       throw new Error('Could not find "继续" button on OAuth consent page. URL: ' + location.href);
     }
   }
+}
 
-  await humanPause(350, 900);
-  continueBtn.scrollIntoView({ behavior: 'smooth', block: 'center' });
-  continueBtn.focus();
-  log('Step 8: Found "继续" button and focused it. Please click it manually.');
+async function waitForButtonEnabled(button, timeout = 8000) {
+  const start = Date.now();
+  while (Date.now() - start < timeout) {
+    throwIfStopped();
+    if (isButtonEnabled(button)) return;
+    await sleep(150);
+  }
+  throw new Error('"继续" button stayed disabled for too long. URL: ' + location.href);
+}
+
+function isButtonEnabled(button) {
+  return Boolean(button)
+    && !button.disabled
+    && button.getAttribute('aria-disabled') !== 'true';
+}
+
+function getSerializableRect(el) {
+  const rect = el.getBoundingClientRect();
+  if (!rect.width || !rect.height) {
+    throw new Error('"继续" button has no clickable size after scrolling. URL: ' + location.href);
+  }
+
+  return {
+    left: rect.left,
+    top: rect.top,
+    width: rect.width,
+    height: rect.height,
+    centerX: rect.left + (rect.width / 2),
+    centerY: rect.top + (rect.height / 2),
+  };
 }
 
 // ============================================================
