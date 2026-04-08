@@ -64,6 +64,10 @@ const DEFAULT_STATE = {
   mailProvider: '163', // 'qq' or '163'
   inbucketHost: '',
   inbucketMailbox: '',
+  freemailApiUrl: '',
+  freemailJwtToken: '',
+  freemailDomain: '',
+  lastSignupCode: null,
 };
 
 function normalizeVpsType(value) {
@@ -124,6 +128,9 @@ async function resetState() {
     'mailProvider',
     'inbucketHost',
     'inbucketMailbox',
+    'freemailApiUrl',
+    'freemailJwtToken',
+    'freemailDomain',
   ]);
   await chrome.storage.session.clear();
   await chrome.storage.session.set({
@@ -138,6 +145,9 @@ async function resetState() {
     mailProvider: prev.mailProvider || '163',
     inbucketHost: prev.inbucketHost || '',
     inbucketMailbox: prev.inbucketMailbox || '',
+    freemailApiUrl: prev.freemailApiUrl || '',
+    freemailJwtToken: prev.freemailJwtToken || '',
+    freemailDomain: prev.freemailDomain || '',
   });
 }
 
@@ -639,6 +649,9 @@ async function handleMessage(message, sender) {
       if (message.payload.mailProvider !== undefined) updates.mailProvider = message.payload.mailProvider;
       if (message.payload.inbucketHost !== undefined) updates.inbucketHost = message.payload.inbucketHost;
       if (message.payload.inbucketMailbox !== undefined) updates.inbucketMailbox = message.payload.inbucketMailbox;
+      if (message.payload.freemailApiUrl !== undefined) updates.freemailApiUrl = message.payload.freemailApiUrl;
+      if (message.payload.freemailJwtToken !== undefined) updates.freemailJwtToken = message.payload.freemailJwtToken;
+      if (message.payload.freemailDomain !== undefined) updates.freemailDomain = message.payload.freemailDomain;
       await setState(updates);
       return { ok: true };
     }
@@ -652,6 +665,14 @@ async function handleMessage(message, sender) {
     case 'FETCH_DUCK_EMAIL': {
       clearStopRequest();
       const email = await fetchDuckEmail(message.payload || {});
+      return { ok: true, email };
+    }
+
+    case 'FETCH_PROVIDER_EMAIL': {
+      clearStopRequest();
+      const state = await getState();
+      const provider = message.payload?.provider || state.mailProvider || '163';
+      const email = await fetchEmailForProvider(provider, state, message.payload || {});
       return { ok: true, email };
     }
 
@@ -854,6 +875,312 @@ async function fetchDuckEmail(options = {}) {
   return result.email;
 }
 
+function normalizeFreemailApiUrl(rawValue) {
+  const value = (rawValue || '').trim();
+  if (!value) return '';
+  const candidate = /^[a-zA-Z][a-zA-Z\d+\-.]*:\/\//.test(value) ? value : `https://${value}`;
+  try {
+    const parsed = new URL(candidate);
+    const normalizedPath = parsed.pathname.replace(/\/+$/, '');
+    return `${parsed.origin}${normalizedPath}`;
+  } catch {
+    return '';
+  }
+}
+
+function parseFreemailMessageTimestamp(message) {
+  const candidates = [
+    message?.timestamp,
+    message?.createdAt,
+    message?.created_at,
+    message?.receivedAt,
+    message?.received_at,
+    message?.date,
+    message?.time,
+  ];
+
+  for (const candidate of candidates) {
+    if (candidate == null || candidate === '') continue;
+    if (typeof candidate === 'number' && Number.isFinite(candidate)) {
+      return candidate < 1e12 ? candidate * 1000 : candidate;
+    }
+    if (typeof candidate === 'string') {
+      const numeric = Number(candidate);
+      if (!Number.isNaN(numeric) && Number.isFinite(numeric)) {
+        return numeric < 1e12 ? numeric * 1000 : numeric;
+      }
+      const parsed = Date.parse(candidate);
+      if (!Number.isNaN(parsed)) return parsed;
+    }
+  }
+  return 0;
+}
+
+function extractFreemailVerificationCode(message) {
+  const directFields = [
+    message?.verification_code,
+    message?.verificationCode,
+    message?.code,
+    message?.otp,
+    message?.captcha,
+    message?.verify_code,
+  ];
+  for (const fieldValue of directFields) {
+    const candidate = String(fieldValue || '').trim();
+    if (!candidate || candidate.toLowerCase() === 'none') continue;
+    const exact = candidate.match(/(^|[^0-9])(\d{6})([^0-9]|$)/);
+    if (exact) return exact[2];
+  }
+
+  const text = [
+    message?.from,
+    message?.sender,
+    message?.preview,
+    message?.subject,
+    message?.text,
+    message?.body,
+    message?.content,
+    message?.html,
+    message?.raw,
+  ].map((item) => String(item || '')).join(' ');
+
+  const semanticPatterns = [
+    /(?:verification\s+code|one[-\s]*time\s+(?:password|code)|security\s+code|login\s+code|验证码|校验码|动态码|認證碼|驗證碼)[^0-9]{0,30}(\d{6})/i,
+    /\bcode\b[^0-9]{0,12}(\d{6})/i,
+    /(^|[^#\d])(\d{6})(?!\d)/,
+  ];
+  for (const pattern of semanticPatterns) {
+    const match = text.match(pattern);
+    if (match) {
+      const value = match[1] && /^\d{6}$/.test(match[1]) ? match[1] : match[2];
+      if (value && /^\d{6}$/.test(value)) return value;
+    }
+  }
+  return '';
+}
+
+function normalizeFreemailMessages(payload) {
+  if (Array.isArray(payload)) return payload;
+  if (!payload || typeof payload !== 'object') return [];
+
+  const candidates = [
+    payload.data,
+    payload.emails,
+    payload.messages,
+    payload.items,
+    payload.list,
+    payload.results,
+  ];
+  for (const candidate of candidates) {
+    if (Array.isArray(candidate)) return candidate;
+  }
+  return [];
+}
+
+function getFreemailMessageId(message) {
+  const rawId = String(message?.id || message?._id || message?.messageId || message?.mail_id || '').trim();
+  if (rawId) return rawId;
+  try {
+    return `hash:${JSON.stringify(message)}`;
+  } catch {
+    return `hash:${String(message)}`;
+  }
+}
+
+async function fetchFreemailJson(state, path, params = {}, method = 'GET', body = null) {
+  const apiBase = normalizeFreemailApiUrl(state.freemailApiUrl);
+  if (!apiBase) {
+    throw new Error('Freemail API URL is empty or invalid.');
+  }
+
+  const url = new URL(`${apiBase}${path}`);
+  Object.entries(params || {}).forEach(([key, value]) => {
+    if (value !== undefined && value !== null && value !== '') {
+      url.searchParams.set(key, String(value));
+    }
+  });
+
+  const headers = {
+    Accept: 'application/json',
+  };
+  const jwtToken = (state.freemailJwtToken || '').trim();
+  if (jwtToken) {
+    headers.Authorization = `Bearer ${jwtToken}`;
+  }
+  if (body != null) {
+    headers['Content-Type'] = 'application/json';
+  }
+
+  const response = await fetch(url.toString(), {
+    method,
+    headers,
+    body: body != null ? JSON.stringify(body) : undefined,
+  });
+
+  let payload = null;
+  let text = '';
+  try {
+    payload = await response.json();
+  } catch {
+    try {
+      text = await response.text();
+    } catch {
+      text = '';
+    }
+  }
+
+  if (!response.ok) {
+    const serverMsg = payload?.error || payload?.message || text || `HTTP ${response.status}`;
+    throw new Error(`Freemail API request failed (${response.status}): ${serverMsg}`);
+  }
+
+  return payload;
+}
+
+async function resolveFreemailDomainIndex(state) {
+  const preferredDomain = String(state.freemailDomain || '').trim().replace(/^@+/, '').toLowerCase();
+  if (!preferredDomain) return null;
+
+  try {
+    const domainsPayload = await fetchFreemailJson(state, '/api/domains');
+    const rawList = Array.isArray(domainsPayload)
+      ? domainsPayload
+      : (
+        Array.isArray(domainsPayload?.domains)
+          ? domainsPayload.domains
+          : (Array.isArray(domainsPayload?.data) ? domainsPayload.data : [])
+      );
+
+    const domains = [];
+    for (const item of rawList) {
+      const value = typeof item === 'object'
+        ? (item.domain || item.name || item.value || '')
+        : item;
+      const domain = String(value || '').trim().replace(/^@+/, '').toLowerCase();
+      if (domain && !domains.includes(domain)) domains.push(domain);
+    }
+
+    const index = domains.findIndex((domain) => domain === preferredDomain);
+    if (index === -1) {
+      await addLog(`Freemail: configured domain "${preferredDomain}" not found in /api/domains. Falling back to default domain.`, 'warn');
+      return 0;
+    }
+    return index;
+  } catch (err) {
+    await addLog(`Freemail: failed to resolve domain list (${err.message}). Falling back to default domain.`, 'warn');
+    return 0;
+  }
+}
+
+async function fetchFreemailEmail(state) {
+  const params = {};
+  const domainIndex = await resolveFreemailDomainIndex(state);
+  if (domainIndex != null) {
+    params.domainIndex = domainIndex;
+  }
+
+  const payload = await fetchFreemailJson(state, '/api/generate', params);
+  const email = String(payload?.email || '').trim();
+  if (!email.includes('@')) {
+    throw new Error('Freemail API did not return a valid email.');
+  }
+
+  const preferredDomain = String(state.freemailDomain || '').trim().replace(/^@+/, '').toLowerCase();
+  if (preferredDomain) {
+    const actualDomain = email.split('@')[1]?.trim().toLowerCase() || '';
+    if (actualDomain && actualDomain !== preferredDomain) {
+      await addLog(`Freemail: expected domain ${preferredDomain}, received ${actualDomain}.`, 'warn');
+    }
+  }
+
+  await setEmailState(email);
+  await addLog(`Freemail: generated mailbox ${email}`, 'ok');
+  return email;
+}
+
+async function pollFreemailVerificationCode(state, options = {}) {
+  const mailbox = String(state.email || '').trim();
+  if (!mailbox) {
+    throw new Error('Freemail polling requires email address (Step 3).');
+  }
+
+  const {
+    step = 4,
+    filterAfterTimestamp = 0,
+    maxAttempts = 20,
+    intervalMs = 3000,
+    excludeCodes = [],
+  } = options;
+
+  const seenMessageIds = new Set();
+  const excludedCodeSet = new Set(
+    (excludeCodes || []).map((item) => String(item || '').trim()).filter(Boolean)
+  );
+
+  for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+    throwIfStopped();
+    const mailboxPayload = await fetchFreemailJson(state, '/api/emails', {
+      mailbox,
+      limit: 20,
+    });
+    let messages = normalizeFreemailMessages(mailboxPayload);
+    if (!messages.length) {
+      try {
+        const emailPayload = await fetchFreemailJson(state, '/api/emails', {
+          email: mailbox,
+          limit: 20,
+        });
+        const fallbackMessages = normalizeFreemailMessages(emailPayload);
+        if (fallbackMessages.length) {
+          messages = fallbackMessages;
+        }
+      } catch {}
+    }
+
+    const relaxedTimestampFilter = attempt > Math.ceil(maxAttempts / 2);
+    for (const message of messages) {
+      const emailTimestamp = parseFreemailMessageTimestamp(message);
+      if (
+        !relaxedTimestampFilter
+        && filterAfterTimestamp
+        && emailTimestamp
+        && emailTimestamp < filterAfterTimestamp
+      ) {
+        continue;
+      }
+
+      const messageId = getFreemailMessageId(message);
+      if (messageId && seenMessageIds.has(messageId)) continue;
+      if (messageId) seenMessageIds.add(messageId);
+
+      const code = extractFreemailVerificationCode(message);
+      if (!code) continue;
+      if (excludedCodeSet.has(code)) continue;
+
+      return {
+        code,
+        emailTimestamp: emailTimestamp || Date.now(),
+        mailId: messageId || null,
+      };
+    }
+
+    if (attempt < maxAttempts) {
+      const mode = attempt > Math.ceil(maxAttempts / 2) ? 'relaxed-time' : 'strict-time';
+      await addLog(`Step ${step}: Freemail polling attempt ${attempt}/${maxAttempts} (${mode}), no new code yet...`, 'info');
+      await sleepWithStop(intervalMs);
+    }
+  }
+
+  throw new Error(`Step ${step}: Freemail verification code not found in time.`);
+}
+
+async function fetchEmailForProvider(provider, state, options = {}) {
+  if (provider === 'freemail') {
+    return fetchFreemailEmail(state);
+  }
+  return fetchDuckEmail(options);
+}
+
 // ============================================================
 // Auto Run Flow
 // ============================================================
@@ -885,6 +1212,9 @@ async function autoRunLoop(totalRuns) {
       mailProvider: prevState.mailProvider,
       inbucketHost: prevState.inbucketHost,
       inbucketMailbox: prevState.inbucketMailbox,
+      freemailApiUrl: prevState.freemailApiUrl,
+      freemailJwtToken: prevState.freemailJwtToken,
+      freemailDomain: prevState.freemailDomain,
       autoRunning: true,
     };
     await resetState();
@@ -904,16 +1234,23 @@ async function autoRunLoop(totalRuns) {
       await executeStepAndWait(2, 2000);
 
       let emailReady = false;
+      const provider = (prevState.mailProvider || '163').trim();
       try {
-        const duckEmail = await fetchDuckEmail({ generateNew: true });
-        await addLog(`=== Run ${run}/${totalRuns} — Duck email ready: ${duckEmail} ===`, 'ok');
+        const currentState = await getState();
+        const autoEmail = await fetchEmailForProvider(provider, currentState, { generateNew: true });
+        const providerLabel = provider === 'freemail' ? 'Freemail' : 'Duck Mail';
+        await addLog(`=== Run ${run}/${totalRuns} — ${providerLabel} email ready: ${autoEmail} ===`, 'ok');
         emailReady = true;
       } catch (err) {
-        await addLog(`Duck Mail auto-fetch failed: ${err.message}`, 'warn');
+        const providerLabel = provider === 'freemail' ? 'Freemail' : 'Duck Mail';
+        await addLog(`${providerLabel} auto-fetch failed: ${err.message}`, 'warn');
       }
 
       if (!emailReady) {
-        await addLog(`=== Run ${run}/${totalRuns} PAUSED: Fetch Duck email or paste manually, then continue ===`, 'warn');
+        const providerHint = provider === 'freemail'
+          ? 'fetch Freemail email or paste manually'
+          : 'fetch Duck email or paste manually';
+        await addLog(`=== Run ${run}/${totalRuns} PAUSED: ${providerHint}, then continue ===`, 'warn');
         chrome.runtime.sendMessage(status('waiting_email')).catch(() => {});
 
         // Wait for RESUME_AUTO_RUN — sets a promise that resumeAutoRun resolves
@@ -1037,8 +1374,15 @@ async function executeStep2(state) {
 // ============================================================
 
 async function executeStep3(state) {
-  if (!state.email) {
-    throw new Error('No email address. Paste email in Side Panel first.');
+  let email = String(state.email || '').trim();
+  if (!email) {
+    if (state.mailProvider === 'freemail') {
+      await addLog('Step 3: No email provided, requesting one from Freemail...', 'info');
+      email = await fetchFreemailEmail(state);
+      state = { ...state, email };
+    } else {
+      throw new Error('No email address. Paste email in Side Panel first.');
+    }
   }
 
   const password = state.customPassword || generatePassword();
@@ -1046,17 +1390,17 @@ async function executeStep3(state) {
 
   // Save account record
   const accounts = state.accounts || [];
-  accounts.push({ email: state.email, password, createdAt: new Date().toISOString() });
+  accounts.push({ email, password, createdAt: new Date().toISOString() });
   await setState({ accounts });
 
   await addLog(
-    `Step 3: Filling email ${state.email}, password ${state.customPassword ? 'customized' : 'generated'} (${password.length} chars)`
+    `Step 3: Filling email ${email}, password ${state.customPassword ? 'customized' : 'generated'} (${password.length} chars)`
   );
   await sendToContentScript('signup-page', {
     type: 'EXECUTE_STEP',
     step: 3,
     source: 'background',
-    payload: { email: state.email, password },
+    payload: { email, password },
   });
 }
 
@@ -1068,6 +1412,9 @@ function getMailConfig(state) {
   const provider = state.mailProvider || 'qq';
   if (provider === '163') {
     return { source: 'mail-163', url: 'https://mail.163.com/js6/main.jsp?df=mail163_letter#module=mbox.ListModule%7C%7B%22fid%22%3A1%2C%22order%22%3A%22date%22%2C%22desc%22%3Atrue%7D', label: '163 Mail' };
+  }
+  if (provider === 'freemail') {
+    return { source: 'freemail-api', label: 'Freemail API', apiDriven: true };
   }
   if (provider === 'inbucket') {
     const host = normalizeInbucketOrigin(state.inbucketHost);
@@ -1130,6 +1477,31 @@ async function executeStep4(state) {
   if (mail.error) throw new Error(mail.error);
   await addLog(`Step 4: Opening ${mail.label}...`);
 
+  if (mail.apiDriven) {
+    const result = await pollFreemailVerificationCode(state, {
+      step: 4,
+      filterAfterTimestamp: state.flowStartTime || 0,
+      maxAttempts: 20,
+      intervalMs: 3000,
+    });
+
+    await setState({ lastEmailTimestamp: result.emailTimestamp, lastSignupCode: result.code });
+    await addLog(`Step 4: Got verification code: ${result.code}`);
+
+    const signupTabId = await getTabId('signup-page');
+    if (!signupTabId) {
+      throw new Error('Signup page tab was closed. Cannot fill verification code.');
+    }
+    await chrome.tabs.update(signupTabId, { active: true });
+    await sendToContentScript('signup-page', {
+      type: 'FILL_CODE',
+      step: 4,
+      source: 'background',
+      payload: { code: result.code },
+    });
+    return;
+  }
+
   // For mail tabs, only create if not alive — don't navigate (preserves login session)
   const alive = await isTabAlive(mail.source);
   if (alive) {
@@ -1168,7 +1540,7 @@ async function executeStep4(state) {
   }
 
   if (result && result.code) {
-    await setState({ lastEmailTimestamp: result.emailTimestamp });
+    await setState({ lastEmailTimestamp: result.emailTimestamp, lastSignupCode: result.code });
     await addLog(`Step 4: Got verification code: ${result.code}`);
 
     // Switch to signup tab and fill code
@@ -1241,6 +1613,30 @@ async function executeStep7(state) {
   const mail = getMailConfig(state);
   if (mail.error) throw new Error(mail.error);
   await addLog(`Step 7: Opening ${mail.label}...`);
+
+  if (mail.apiDriven) {
+    const result = await pollFreemailVerificationCode(state, {
+      step: 7,
+      filterAfterTimestamp: state.lastEmailTimestamp || state.flowStartTime || 0,
+      maxAttempts: 20,
+      intervalMs: 3000,
+      excludeCodes: state.lastSignupCode ? [state.lastSignupCode] : [],
+    });
+
+    await addLog(`Step 7: Got login verification code: ${result.code}`);
+    const signupTabId = await getTabId('signup-page');
+    if (!signupTabId) {
+      throw new Error('Auth page tab was closed. Cannot fill verification code.');
+    }
+    await chrome.tabs.update(signupTabId, { active: true });
+    await sendToContentScript('signup-page', {
+      type: 'FILL_CODE',
+      step: 7,
+      source: 'background',
+      payload: { code: result.code },
+    });
+    return;
+  }
 
   const alive = await isTabAlive(mail.source);
   if (alive) {

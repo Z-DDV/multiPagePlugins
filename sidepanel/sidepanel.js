@@ -31,6 +31,12 @@ const rowInbucketHost = document.getElementById('row-inbucket-host');
 const inputInbucketHost = document.getElementById('input-inbucket-host');
 const rowInbucketMailbox = document.getElementById('row-inbucket-mailbox');
 const inputInbucketMailbox = document.getElementById('input-inbucket-mailbox');
+const rowFreemailApiUrl = document.getElementById('row-freemail-api-url');
+const inputFreemailApiUrl = document.getElementById('input-freemail-api-url');
+const rowFreemailJwtToken = document.getElementById('row-freemail-jwt-token');
+const inputFreemailJwtToken = document.getElementById('input-freemail-jwt-token');
+const rowFreemailDomain = document.getElementById('row-freemail-domain');
+const inputFreemailDomain = document.getElementById('input-freemail-domain');
 const inputRunCount = document.getElementById('input-run-count');
 
 // ============================================================
@@ -100,6 +106,15 @@ async function restoreState() {
     if (state.inbucketMailbox) {
       inputInbucketMailbox.value = state.inbucketMailbox;
     }
+    if (state.freemailApiUrl) {
+      inputFreemailApiUrl.value = state.freemailApiUrl;
+    }
+    if (state.freemailJwtToken) {
+      inputFreemailJwtToken.value = state.freemailJwtToken;
+    }
+    if (state.freemailDomain) {
+      inputFreemailDomain.value = state.freemailDomain;
+    }
 
     if (state.stepStatuses) {
       for (const [step, status] of Object.entries(state.stepStatuses)) {
@@ -127,8 +142,12 @@ function syncPasswordField(state) {
 
 function updateMailProviderUI() {
   const useInbucket = selectMailProvider.value === 'inbucket';
+  const useFreemail = selectMailProvider.value === 'freemail';
   rowInbucketHost.style.display = useInbucket ? '' : 'none';
   rowInbucketMailbox.style.display = useInbucket ? '' : 'none';
+  rowFreemailApiUrl.style.display = useFreemail ? '' : 'none';
+  rowFreemailJwtToken.style.display = useFreemail ? '' : 'none';
+  rowFreemailDomain.style.display = useFreemail ? '' : 'none';
 }
 
 // ============================================================
@@ -259,16 +278,17 @@ function escapeHtml(text) {
   return div.innerHTML;
 }
 
-async function fetchDuckEmail() {
+async function fetchProviderEmail() {
   const defaultLabel = 'Auto';
   btnFetchEmail.disabled = true;
   btnFetchEmail.textContent = '...';
+  const provider = selectMailProvider.value;
 
   try {
     const response = await chrome.runtime.sendMessage({
-      type: 'FETCH_DUCK_EMAIL',
+      type: 'FETCH_PROVIDER_EMAIL',
       source: 'sidepanel',
-      payload: { generateNew: true },
+      payload: { provider, generateNew: true },
     });
 
     if (response?.error) {
@@ -315,7 +335,7 @@ document.querySelectorAll('.step-btn').forEach(btn => {
 });
 
 btnFetchEmail.addEventListener('click', async () => {
-  await fetchDuckEmail().catch(() => {});
+  await fetchProviderEmail().catch(() => {});
 });
 
 btnTogglePassword.addEventListener('click', () => {
@@ -341,7 +361,7 @@ btnAutoRun.addEventListener('click', async () => {
 btnAutoContinue.addEventListener('click', async () => {
   const email = inputEmail.value.trim();
   if (!email) {
-    showToast('Please fetch or paste DuckDuckGo email first!', 'warn');
+    showToast('Please fetch or paste email first!', 'warn');
     return;
   }
   autoContinueBar.style.display = 'none';
@@ -429,6 +449,30 @@ inputInbucketHost.addEventListener('change', async () => {
     type: 'SAVE_SETTING',
     source: 'sidepanel',
     payload: { inbucketHost: inputInbucketHost.value.trim() },
+  });
+});
+
+inputFreemailApiUrl.addEventListener('change', async () => {
+  await chrome.runtime.sendMessage({
+    type: 'SAVE_SETTING',
+    source: 'sidepanel',
+    payload: { freemailApiUrl: inputFreemailApiUrl.value.trim() },
+  });
+});
+
+inputFreemailJwtToken.addEventListener('change', async () => {
+  await chrome.runtime.sendMessage({
+    type: 'SAVE_SETTING',
+    source: 'sidepanel',
+    payload: { freemailJwtToken: inputFreemailJwtToken.value.trim() },
+  });
+});
+
+inputFreemailDomain.addEventListener('change', async () => {
+  await chrome.runtime.sendMessage({
+    type: 'SAVE_SETTING',
+    source: 'sidepanel',
+    payload: { freemailDomain: inputFreemailDomain.value.trim() },
   });
 });
 
