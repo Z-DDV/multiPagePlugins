@@ -25,6 +25,7 @@ const btnAutoContinue = document.getElementById('btn-auto-continue');
 const autoContinueBar = document.getElementById('auto-continue-bar');
 const btnClearLog = document.getElementById('btn-clear-log');
 const inputVpsUrl = document.getElementById('input-vps-url');
+const selectVpsType = document.getElementById('select-vps-type');
 const selectMailProvider = document.getElementById('select-mail-provider');
 const rowInbucketHost = document.getElementById('row-inbucket-host');
 const inputInbucketHost = document.getElementById('input-inbucket-host');
@@ -86,6 +87,9 @@ async function restoreState() {
     syncPasswordField(state);
     if (state.vpsUrl) {
       inputVpsUrl.value = state.vpsUrl;
+    }
+    if (state.vpsType) {
+      selectVpsType.value = state.vpsType;
     }
     if (state.mailProvider) {
       selectMailProvider.value = state.mailProvider;
@@ -386,6 +390,14 @@ inputVpsUrl.addEventListener('change', async () => {
   if (vpsUrl) {
     await chrome.runtime.sendMessage({ type: 'SAVE_SETTING', source: 'sidepanel', payload: { vpsUrl } });
   }
+});
+
+selectVpsType.addEventListener('change', async () => {
+  await chrome.runtime.sendMessage({
+    type: 'SAVE_SETTING',
+    source: 'sidepanel',
+    payload: { vpsType: selectVpsType.value },
+  });
 });
 
 inputPassword.addEventListener('change', async () => {

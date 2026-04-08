@@ -46,7 +46,14 @@
     <div class="data-card">
       <div class="data-row">
         <span class="data-label">VPS</span>
-        <input type="password" id="input-vps-url" class="data-input" placeholder="http://ip:port/management.html#/oauth" />
+        <input type="password" id="input-vps-url" class="data-input" placeholder=".../management.html#/oauth 或 .../manage/oauth" />
+      </div>
+      <div class="data-row">
+        <span class="data-label">VPSTYPE</span>
+        <select id="select-vps-type" class="data-select">
+          <option value="Cli-Proxy-API-Management-Center">Cli-Proxy-API-Management-Center</option>
+          <option value="codeProxy">codeProxy</option>
+        </select>
       </div>
       <div class="data-row">
         <span class="data-label">Mail</span>

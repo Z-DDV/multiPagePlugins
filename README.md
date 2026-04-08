@@ -7,6 +7,9 @@
 ## 当前能力
 
 - 从 VPS 面板自动获取 OpenAI OAuth 授权链接
+- 支持两种 VPS 前端管理界面（通过 `VPSTYPE` 切换）：
+  - `Cli-Proxy-API-Management-Center`
+  - `codeProxy`
 - 自动打开 OpenAI 注册页并点击 `Sign up / Register`
 - 自动填写邮箱与密码
 - 支持自定义密码；留空时自动生成强密码
@@ -44,13 +47,26 @@
 
 ### `VPS`
 
-你的管理面板 OAuth 页面地址，例如：
+你的管理面板 OAuth 页面地址。根据前端类型，常见格式如下：
 
 ```txt
-http(s)://<your-host>/management.html#/oauth
+Cli-Proxy-API-Management-Center: http(s)://<your-host>/management.html#/oauth
+codeProxy(/manage 构建):         http(s)://<your-host>/manage/oauth
 ```
 
 Step 1 和 Step 9 都依赖这个地址。
+
+### `VPSTYPE`
+
+用于告诉扩展当前 VPS 面板是哪套前端：
+
+- `Cli-Proxy-API-Management-Center`
+- `codeProxy`
+
+选择规则：
+
+- 地址像 `.../management.html#/oauth`，选 `Cli-Proxy-API-Management-Center`
+- 地址像 `.../manage/oauth`，选 `codeProxy`
 
 ### `Mail`
 
@@ -139,7 +155,7 @@ Step 3 使用的注册邮箱。
 5. `Fill Name / Birthday`
 6. `Login via OAuth`
 7. `Get Login Code`
-8. `Manual OAuth Confirm`
+8. `OAuth Auto Confirm`
 9. `VPS Verify`
 
 ### Auto 模式
@@ -167,7 +183,7 @@ Step 3 使用的注册邮箱。
 
 - 打开 VPS OAuth 面板
 - 等待 `Codex OAuth` 卡片出现
-- 点击“登录”
+- 按 `VPSTYPE` 使用对应的 DOM 选择器并点击“登录 / 开始授权”
 - 读取页面里的授权链接
 
 结果会保存到侧边栏的 `OAuth` 字段。
@@ -228,9 +244,9 @@ Step 3 使用的注册邮箱。
 
 与 Step 4 类似，但会使用稍微不同的关键词组合去找登录验证码邮件。
 
-### Step 8: Manual OAuth Confirm
+### Step 8: OAuth Auto Confirm
 
-虽然按钮名称还是 `Manual OAuth Confirm`，但当前代码已经做了自动尝试：
+虽然早期文案叫 `Manual OAuth Confirm`，但当前代码已经做了自动尝试：
 
 - 在授权页定位“继续”按钮
 - 等待按钮可点击
@@ -251,7 +267,7 @@ Step 3 使用的注册邮箱。
 
 - 自动填写 localhost 回调地址
 - 自动点击“提交回调 URL”
-- 等待“认证成功”状态
+- 等待提交状态（如“认证成功 / 已提交 / success”）
 
 ## Duck 邮箱自动获取
 

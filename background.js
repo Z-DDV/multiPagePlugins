@@ -7,6 +7,8 @@ const DUCK_AUTOFILL_URL = 'https://duckduckgo.com/email/settings/autofill';
 const STOP_ERROR_MESSAGE = 'Flow stopped by user.';
 const HUMAN_STEP_DELAY_MIN = 700;
 const HUMAN_STEP_DELAY_MAX = 2200;
+const VPS_TYPE_CPAMC = 'Cli-Proxy-API-Management-Center';
+const VPS_TYPE_CODE_PROXY = 'codeProxy';
 
 initializeSessionStorageAccess();
 
@@ -57,11 +59,16 @@ const DEFAULT_STATE = {
   tabRegistry: {},
   logs: [],
   vpsUrl: '',
+  vpsType: VPS_TYPE_CPAMC,
   customPassword: '',
   mailProvider: '163', // 'qq' or '163'
   inbucketHost: '',
   inbucketMailbox: '',
 };
+
+function normalizeVpsType(value) {
+  return value === VPS_TYPE_CODE_PROXY ? VPS_TYPE_CODE_PROXY : VPS_TYPE_CPAMC;
+}
 
 async function getState() {
   const state = await chrome.storage.session.get(null);
@@ -112,6 +119,7 @@ async function resetState() {
     'accounts',
     'tabRegistry',
     'vpsUrl',
+    'vpsType',
     'customPassword',
     'mailProvider',
     'inbucketHost',
@@ -125,6 +133,7 @@ async function resetState() {
     accounts: prev.accounts || [],
     tabRegistry: prev.tabRegistry || {},
     vpsUrl: prev.vpsUrl || '',
+    vpsType: normalizeVpsType(prev.vpsType),
     customPassword: prev.customPassword || '',
     mailProvider: prev.mailProvider || '163',
     inbucketHost: prev.inbucketHost || '',
@@ -625,6 +634,7 @@ async function handleMessage(message, sender) {
     case 'SAVE_SETTING': {
       const updates = {};
       if (message.payload.vpsUrl !== undefined) updates.vpsUrl = message.payload.vpsUrl;
+      if (message.payload.vpsType !== undefined) updates.vpsType = normalizeVpsType(message.payload.vpsType);
       if (message.payload.customPassword !== undefined) updates.customPassword = message.payload.customPassword;
       if (message.payload.mailProvider !== undefined) updates.mailProvider = message.payload.mailProvider;
       if (message.payload.inbucketHost !== undefined) updates.inbucketHost = message.payload.inbucketHost;
@@ -871,6 +881,7 @@ async function autoRunLoop(totalRuns) {
     const prevState = await getState();
     const keepSettings = {
       vpsUrl: prevState.vpsUrl,
+      vpsType: normalizeVpsType(prevState.vpsType),
       mailProvider: prevState.mailProvider,
       inbucketHost: prevState.inbucketHost,
       inbucketMailbox: prevState.inbucketMailbox,
@@ -998,7 +1009,7 @@ async function executeStep1(state) {
     type: 'EXECUTE_STEP',
     step: 1,
     source: 'background',
-    payload: {},
+    payload: { vpsType: normalizeVpsType(state.vpsType) },
   });
 }
 
@@ -1456,7 +1467,10 @@ async function executeStep9(state) {
     type: 'EXECUTE_STEP',
     step: 9,
     source: 'background',
-    payload: { localhostUrl: state.localhostUrl },
+    payload: {
+      localhostUrl: state.localhostUrl,
+      vpsType: normalizeVpsType(state.vpsType),
+    },
   });
 }
 
