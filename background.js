@@ -11,12 +11,15 @@ const VPS_TYPE_CPAMC = 'Cli-Proxy-API-Management-Center';
 const VPS_TYPE_CODE_PROXY = 'codeProxy';
 const AUTH_FLOW_MAX_RECOVERY_ATTEMPTS = 5;
 const DUCK_AUTO_FETCH_MAX_ATTEMPTS = 5;
+const DEFAULT_STEP_COMPLETION_TIMEOUT_MS = 120000;
+const VERIFICATION_STEP_COMPLETION_TIMEOUT_MS = 360000;
 const VERIFICATION_POLL_SETTINGS = {
   maxAttempts: 45,
   intervalMs: 5000,
   fallbackAfterAttempts: 42,
   freemailRelaxAfterAttempts: 43,
 };
+const PRE_RESEND_VERIFICATION_POLL_ATTEMPTS = 8; // ~40s before we fall back to clicking "resend email"
 const OPENAI_SITE_DATA_ORIGINS = [
   'https://openai.com',
   'https://chatgpt.com',
@@ -851,6 +854,12 @@ function waitForStepComplete(step, timeoutMs = 120000) {
   });
 }
 
+function getStepCompletionTimeout(step) {
+  return step === 4 || step === 7
+    ? VERIFICATION_STEP_COMPLETION_TIMEOUT_MS
+    : DEFAULT_STEP_COMPLETION_TIMEOUT_MS;
+}
+
 function notifyStepComplete(step, payload) {
   const waiter = stepWaiters.get(step);
   if (waiter) waiter.resolve(payload);
@@ -955,7 +964,7 @@ async function executeStep(step) {
  */
 async function executeStepAndWait(step, delayAfter = 2000) {
   throwIfStopped();
-  const promise = waitForStepComplete(step, 120000);
+  const promise = waitForStepComplete(step, getStepCompletionTimeout(step));
   await executeStep(step);
   await promise;
   // Extra delay for page transitions / DOM updates
@@ -1645,6 +1654,163 @@ function getMailConfig(state) {
   return { source: 'qq-mail', url: 'https://wx.mail.qq.com/', label: 'QQ Mail' };
 }
 
+function getVerificationPollConfig(step) {
+  if (step === 7) {
+    return {
+      codeLabel: 'login verification code',
+      senderFilters: ['openai', 'noreply', 'verify', 'auth', 'chatgpt', 'duckduckgo', 'forward'],
+      subjectFilters: ['verify', 'verification', 'code', '楠岃瘉', 'confirm', 'login'],
+      tabClosedError: 'Auth page tab was closed. Cannot fill verification code.',
+    };
+  }
+
+  return {
+    codeLabel: 'verification code',
+    senderFilters: ['openai', 'noreply', 'verify', 'auth', 'duckduckgo', 'forward'],
+    subjectFilters: ['verify', 'verification', 'code', '楠岃瘉', 'confirm'],
+    tabClosedError: 'Signup page tab was closed. Cannot fill verification code.',
+  };
+}
+
+function isVerificationPollTimeoutError(err) {
+  const message = String(err?.message || err || '');
+  return /verification code not found in time|No new matching email found|No matching verification email found/i.test(message);
+}
+
+async function ensureMailChannelReady(mail, step, phaseLabel = '') {
+  const phaseSuffix = phaseLabel ? ` (${phaseLabel})` : '';
+  await addLog(`Step ${step}: Opening ${mail.label}${phaseSuffix}...`);
+
+  // For mail tabs, only create if not alive; reusing avoids losing the current login session.
+  const alive = await isTabAlive(mail.source);
+  if (alive) {
+    if (mail.navigateOnReuse) {
+      await reuseOrCreateTab(mail.source, mail.url, {
+        inject: mail.inject,
+        injectSource: mail.injectSource,
+      });
+    } else {
+      const tabId = await getTabId(mail.source);
+      await chrome.tabs.update(tabId, { active: true });
+    }
+    return;
+  }
+
+  await reuseOrCreateTab(mail.source, mail.url, {
+    inject: mail.inject,
+    injectSource: mail.injectSource,
+  });
+}
+
+async function pollVerificationCode(step, state, options = {}) {
+  const {
+    disableFallback = false,
+    excludeCodes = [],
+    filterAfterTimestamp = 0,
+    maxAttempts = VERIFICATION_POLL_SETTINGS.maxAttempts,
+    phaseLabel = '',
+    relaxTimestampAfterAttempts = VERIFICATION_POLL_SETTINGS.freemailRelaxAfterAttempts,
+    suppressStepError = false,
+  } = options;
+
+  const mail = getMailConfig(state);
+  if (mail.error) throw new Error(mail.error);
+
+  const pollConfig = getVerificationPollConfig(step);
+  await ensureMailChannelReady(mail, step, phaseLabel);
+
+  if (mail.apiDriven) {
+    return pollFreemailVerificationCode(state, {
+      step,
+      filterAfterTimestamp,
+      maxAttempts,
+      intervalMs: VERIFICATION_POLL_SETTINGS.intervalMs,
+      relaxTimestampAfterAttempts,
+      excludeCodes,
+    });
+  }
+
+  const result = await sendToContentScript(mail.source, {
+    type: 'POLL_EMAIL',
+    step,
+    source: 'background',
+    payload: {
+      filterAfterTimestamp,
+      senderFilters: pollConfig.senderFilters,
+      subjectFilters: pollConfig.subjectFilters,
+      targetEmail: state.email,
+      maxAttempts,
+      intervalMs: VERIFICATION_POLL_SETTINGS.intervalMs,
+      fallbackAfterAttempts: VERIFICATION_POLL_SETTINGS.fallbackAfterAttempts,
+      disableFallback,
+      suppressStepError,
+    },
+  });
+
+  if (result && result.error) {
+    throw new Error(result.error);
+  }
+
+  return result;
+}
+
+async function fillVerificationCodeForStep(step, result) {
+  if (!result?.code) return false;
+
+  const pollConfig = getVerificationPollConfig(step);
+  const stateUpdates = {};
+  if (result.emailTimestamp) stateUpdates.lastEmailTimestamp = result.emailTimestamp;
+  if (step === 4) stateUpdates.lastSignupCode = result.code;
+  if (Object.keys(stateUpdates).length > 0) {
+    await setState(stateUpdates);
+  }
+
+  await addLog(`Step ${step}: Got ${pollConfig.codeLabel}: ${result.code}`);
+
+  const signupTabId = await getTabId('signup-page');
+  if (!signupTabId) {
+    throw new Error(pollConfig.tabClosedError);
+  }
+
+  await chrome.tabs.update(signupTabId, { active: true });
+  await sendToContentScript('signup-page', {
+    type: 'FILL_CODE',
+    step,
+    source: 'background',
+    payload: { code: result.code },
+  });
+  return true;
+}
+
+async function pollVerificationCodeBeforeResend(step, state, options = {}) {
+  try {
+    const result = await pollVerificationCode(step, state, {
+      ...options,
+      disableFallback: true,
+      maxAttempts: PRE_RESEND_VERIFICATION_POLL_ATTEMPTS,
+      phaseLabel: 'initial mailbox wait',
+      relaxTimestampAfterAttempts: PRE_RESEND_VERIFICATION_POLL_ATTEMPTS,
+      suppressStepError: true,
+    });
+
+    if (!result?.code) return false;
+
+    await addLog(`Step ${step}: Code arrived during the initial mailbox wait, skipping resend.`, 'ok');
+    await fillVerificationCodeForStep(step, result);
+    return true;
+  } catch (err) {
+    if (!isVerificationPollTimeoutError(err)) {
+      throw err;
+    }
+
+    await addLog(
+      `Step ${step}: No code arrived during the initial mailbox wait (~40s). Resending email and continuing to poll...`,
+      'warn'
+    );
+    return false;
+  }
+}
+
 function normalizeInbucketOrigin(rawValue) {
   const value = (rawValue || '').trim();
   if (!value) return '';
@@ -1679,97 +1845,18 @@ async function clickResendOnSignupPage(step) {
 
 async function executeStep4(state) {
   const stepStartTimestamp = Date.now();
-  // Click "重新发送电子邮件" on the signup page before polling
-  await clickResendOnSignupPage(4);
-
-  const mail = getMailConfig(state);
-  if (mail.error) throw new Error(mail.error);
-  await addLog(`Step 4: Opening ${mail.label}...`);
-
-  if (mail.apiDriven) {
-    const result = await pollFreemailVerificationCode(state, {
-      step: 4,
-      filterAfterTimestamp: stepStartTimestamp,
-      maxAttempts: VERIFICATION_POLL_SETTINGS.maxAttempts,
-      intervalMs: VERIFICATION_POLL_SETTINGS.intervalMs,
-      relaxTimestampAfterAttempts: VERIFICATION_POLL_SETTINGS.freemailRelaxAfterAttempts,
-    });
-
-    await setState({ lastEmailTimestamp: result.emailTimestamp, lastSignupCode: result.code });
-    await addLog(`Step 4: Got verification code: ${result.code}`);
-
-    const signupTabId = await getTabId('signup-page');
-    if (!signupTabId) {
-      throw new Error('Signup page tab was closed. Cannot fill verification code.');
-    }
-    await chrome.tabs.update(signupTabId, { active: true });
-    await sendToContentScript('signup-page', {
-      type: 'FILL_CODE',
-      step: 4,
-      source: 'background',
-      payload: { code: result.code },
-    });
+  if (await pollVerificationCodeBeforeResend(4, state, { filterAfterTimestamp: stepStartTimestamp })) {
     return;
   }
 
-  // For mail tabs, only create if not alive — don't navigate (preserves login session)
-  const alive = await isTabAlive(mail.source);
-  if (alive) {
-    if (mail.navigateOnReuse) {
-      await reuseOrCreateTab(mail.source, mail.url, {
-        inject: mail.inject,
-        injectSource: mail.injectSource,
-      });
-    } else {
-      const tabId = await getTabId(mail.source);
-      await chrome.tabs.update(tabId, { active: true });
-    }
-  } else {
-    await reuseOrCreateTab(mail.source, mail.url, {
-      inject: mail.inject,
-      injectSource: mail.injectSource,
-    });
-  }
+  await clickResendOnSignupPage(4);
 
-  const result = await sendToContentScript(mail.source, {
-    type: 'POLL_EMAIL',
-    step: 4,
-    source: 'background',
-    payload: {
-      filterAfterTimestamp: stepStartTimestamp,
-      senderFilters: ['openai', 'noreply', 'verify', 'auth', 'duckduckgo', 'forward'],
-      subjectFilters: ['verify', 'verification', 'code', '验证', 'confirm'],
-      targetEmail: state.email,
-      maxAttempts: VERIFICATION_POLL_SETTINGS.maxAttempts,
-      intervalMs: VERIFICATION_POLL_SETTINGS.intervalMs,
-      fallbackAfterAttempts: VERIFICATION_POLL_SETTINGS.fallbackAfterAttempts,
-    },
+  const result = await pollVerificationCode(4, state, {
+    filterAfterTimestamp: stepStartTimestamp,
+    phaseLabel: 'post-resend wait',
   });
-
-  if (result && result.error) {
-    throw new Error(result.error);
-  }
-
-  if (result && result.code) {
-    await setState({ lastEmailTimestamp: result.emailTimestamp, lastSignupCode: result.code });
-    await addLog(`Step 4: Got verification code: ${result.code}`);
-
-    // Switch to signup tab and fill code
-    const signupTabId = await getTabId('signup-page');
-    if (signupTabId) {
-      await chrome.tabs.update(signupTabId, { active: true });
-      await sendToContentScript('signup-page', {
-        type: 'FILL_CODE',
-        step: 4,
-        source: 'background',
-        payload: { code: result.code },
-      });
-    } else {
-      throw new Error('Signup page tab was closed. Cannot fill verification code.');
-    }
-  }
+  await fillVerificationCodeForStep(4, result);
 }
-
 // ============================================================
 // Step 5: Fill Name & Birthday (via signup-page.js)
 // ============================================================
@@ -1819,94 +1906,23 @@ async function executeStep6(state) {
 
 async function executeStep7(state) {
   const stepStartTimestamp = Date.now();
-  // Click "重新发送电子邮件" on the auth page before polling
-  await clickResendOnSignupPage(7);
-
-  const mail = getMailConfig(state);
-  if (mail.error) throw new Error(mail.error);
-  await addLog(`Step 7: Opening ${mail.label}...`);
-
-  if (mail.apiDriven) {
-    const result = await pollFreemailVerificationCode(state, {
-      step: 7,
-      filterAfterTimestamp: stepStartTimestamp,
-      maxAttempts: VERIFICATION_POLL_SETTINGS.maxAttempts,
-      intervalMs: VERIFICATION_POLL_SETTINGS.intervalMs,
-      relaxTimestampAfterAttempts: VERIFICATION_POLL_SETTINGS.freemailRelaxAfterAttempts,
-      excludeCodes: state.lastSignupCode ? [state.lastSignupCode] : [],
-    });
-
-    await addLog(`Step 7: Got login verification code: ${result.code}`);
-    const signupTabId = await getTabId('signup-page');
-    if (!signupTabId) {
-      throw new Error('Auth page tab was closed. Cannot fill verification code.');
-    }
-    await chrome.tabs.update(signupTabId, { active: true });
-    await sendToContentScript('signup-page', {
-      type: 'FILL_CODE',
-      step: 7,
-      source: 'background',
-      payload: { code: result.code },
-    });
+  const excludeCodes = state.lastSignupCode ? [state.lastSignupCode] : [];
+  if (await pollVerificationCodeBeforeResend(7, state, {
+    filterAfterTimestamp: stepStartTimestamp,
+    excludeCodes,
+  })) {
     return;
   }
 
-  const alive = await isTabAlive(mail.source);
-  if (alive) {
-    if (mail.navigateOnReuse) {
-      await reuseOrCreateTab(mail.source, mail.url, {
-        inject: mail.inject,
-        injectSource: mail.injectSource,
-      });
-    } else {
-      const tabId = await getTabId(mail.source);
-      await chrome.tabs.update(tabId, { active: true });
-    }
-  } else {
-    await reuseOrCreateTab(mail.source, mail.url, {
-      inject: mail.inject,
-      injectSource: mail.injectSource,
-    });
-  }
+  await clickResendOnSignupPage(7);
 
-  const result = await sendToContentScript(mail.source, {
-    type: 'POLL_EMAIL',
-    step: 7,
-    source: 'background',
-    payload: {
-      filterAfterTimestamp: stepStartTimestamp,
-      senderFilters: ['openai', 'noreply', 'verify', 'auth', 'chatgpt', 'duckduckgo', 'forward'],
-      subjectFilters: ['verify', 'verification', 'code', '验证', 'confirm', 'login'],
-      targetEmail: state.email,
-      maxAttempts: VERIFICATION_POLL_SETTINGS.maxAttempts,
-      intervalMs: VERIFICATION_POLL_SETTINGS.intervalMs,
-      fallbackAfterAttempts: VERIFICATION_POLL_SETTINGS.fallbackAfterAttempts,
-    },
+  const result = await pollVerificationCode(7, state, {
+    filterAfterTimestamp: stepStartTimestamp,
+    excludeCodes,
+    phaseLabel: 'post-resend wait',
   });
-
-  if (result && result.error) {
-    throw new Error(result.error);
-  }
-
-  if (result && result.code) {
-    await addLog(`Step 7: Got login verification code: ${result.code}`);
-
-    // Switch to signup/auth tab and fill code
-    const signupTabId = await getTabId('signup-page');
-    if (signupTabId) {
-      await chrome.tabs.update(signupTabId, { active: true });
-      await sendToContentScript('signup-page', {
-        type: 'FILL_CODE',
-        step: 7,
-        source: 'background',
-        payload: { code: result.code },
-      });
-    } else {
-      throw new Error('Auth page tab was closed. Cannot fill verification code.');
-    }
-  }
+  await fillVerificationCodeForStep(7, result);
 }
-
 // ============================================================
 // Step 8: Complete OAuth (auto click + localhost listener)
 // ============================================================

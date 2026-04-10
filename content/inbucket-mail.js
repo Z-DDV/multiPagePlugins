@@ -49,7 +49,9 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         sendResponse({ stopped: true, error: err.message });
         return;
       }
-      reportError(message.step, err.message);
+      if (!message.payload?.suppressStepError) {
+        reportError(message.step, err.message);
+      }
       sendResponse({ error: err.message });
     });
     return true;
@@ -167,6 +169,7 @@ async function deleteCurrentMailboxMessage(step) {
 
 async function handleMailboxPollEmail(step, payload) {
   const {
+    disableFallback = false,
     senderFilters = [],
     subjectFilters = [],
     maxAttempts = 20,
@@ -186,10 +189,13 @@ async function handleMailboxPollEmail(step, payload) {
   const existingMailIds = getCurrentMailboxIds();
   log(`Step ${step}: Snapshotted ${existingMailIds.size} existing mailbox messages`);
 
-  const fallbackAfter = Math.min(
-    maxAttempts - 1,
-    Math.max(1, Number.isFinite(fallbackAfterAttempts) ? fallbackAfterAttempts : Math.ceil(maxAttempts * 0.8))
-  );
+  const fallbackEnabled = !disableFallback && maxAttempts > 1;
+  const fallbackAfter = fallbackEnabled
+    ? Math.min(
+      maxAttempts - 1,
+      Math.max(1, Number.isFinite(fallbackAfterAttempts) ? fallbackAfterAttempts : Math.ceil(maxAttempts * 0.8))
+    )
+    : Number.POSITIVE_INFINITY;
 
   for (let attempt = 1; attempt <= maxAttempts; attempt++) {
     log(`Polling Inbucket mailbox... attempt ${attempt}/${maxAttempts}`);
@@ -199,7 +205,7 @@ async function handleMailboxPollEmail(step, payload) {
     }
 
     const entries = Array.from(findMailboxEntries()).map(parseMailboxEntry);
-    const useFallback = attempt > fallbackAfter;
+    const useFallback = fallbackEnabled && attempt > fallbackAfter;
     const candidates = [];
 
     for (const mail of entries) {
@@ -237,7 +243,7 @@ async function handleMailboxPollEmail(step, payload) {
       };
     }
 
-    if (attempt === fallbackAfter + 1) {
+    if (fallbackEnabled && attempt === fallbackAfter + 1) {
       log(`Step ${step}: No new mailbox messages yet, falling back to older matching messages`, 'warn');
     }
 

@@ -31,7 +31,9 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         sendResponse({ stopped: true, error: err.message });
         return;
       }
-      reportError(message.step, err.message);
+      if (!message.payload?.suppressStepError) {
+        reportError(message.step, err.message);
+      }
       sendResponse({ error: err.message });
     });
     return true; // async response
@@ -55,7 +57,14 @@ function getCurrentMailIds() {
 // ============================================================
 
 async function handlePollEmail(step, payload) {
-  const { senderFilters, subjectFilters, maxAttempts, intervalMs, fallbackAfterAttempts } = payload;
+  const {
+    disableFallback = false,
+    senderFilters,
+    subjectFilters,
+    maxAttempts,
+    intervalMs,
+    fallbackAfterAttempts,
+  } = payload;
 
   log(`Step ${step}: Starting email poll (max ${maxAttempts} attempts, every ${intervalMs / 1000}s)`);
 
@@ -71,10 +80,13 @@ async function handlePollEmail(step, payload) {
   const existingMailIds = getCurrentMailIds();
   log(`Step ${step}: Snapshotted ${existingMailIds.size} existing emails as "old"`);
 
-  const fallbackAfter = Math.min(
-    maxAttempts - 1,
-    Math.max(1, Number.isFinite(fallbackAfterAttempts) ? fallbackAfterAttempts : Math.ceil(maxAttempts * 0.8))
-  );
+  const fallbackEnabled = !disableFallback && maxAttempts > 1;
+  const fallbackAfter = fallbackEnabled
+    ? Math.min(
+      maxAttempts - 1,
+      Math.max(1, Number.isFinite(fallbackAfterAttempts) ? fallbackAfterAttempts : Math.ceil(maxAttempts * 0.8))
+    )
+    : Number.POSITIVE_INFINITY;
 
   for (let attempt = 1; attempt <= maxAttempts; attempt++) {
     log(`Polling QQ Mail... attempt ${attempt}/${maxAttempts}`);
@@ -86,7 +98,7 @@ async function handlePollEmail(step, payload) {
     }
 
     const allItems = document.querySelectorAll('.mail-list-page-item[data-mailid]');
-    const useFallback = attempt > fallbackAfter;
+    const useFallback = fallbackEnabled && attempt > fallbackAfter;
 
     // Phase 1: only look at NEW emails (not in snapshot)
     // Phase 2: fallback to first matching email in list near the end of the polling window
@@ -112,7 +124,7 @@ async function handlePollEmail(step, payload) {
       }
     }
 
-    if (attempt === fallbackAfter + 1) {
+    if (fallbackEnabled && attempt === fallbackAfter + 1) {
       log(`Step ${step}: No new emails after ${fallbackAfter} attempts, falling back to first matching email`, 'warn');
     }
 

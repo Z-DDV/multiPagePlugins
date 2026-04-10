@@ -58,7 +58,9 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         sendResponse({ stopped: true, error: err.message });
         return;
       }
-      reportError(message.step, err.message);
+      if (!message.payload?.suppressStepError) {
+        reportError(message.step, err.message);
+      }
       sendResponse({ error: err.message });
     });
     return true;
@@ -97,6 +99,7 @@ function getCurrentMailIds() {
 
 async function handlePollEmail(step, payload) {
   const {
+    disableFallback = false,
     senderFilters,
     subjectFilters,
     maxAttempts,
@@ -130,10 +133,13 @@ async function handlePollEmail(step, payload) {
   const existingMailIds = getCurrentMailIds();
   log(`Step ${step}: Snapshotted ${existingMailIds.size} existing emails`);
 
-  const fallbackAfter = Math.min(
-    maxAttempts - 1,
-    Math.max(1, Number.isFinite(fallbackAfterAttempts) ? fallbackAfterAttempts : Math.ceil(maxAttempts * 0.8))
-  );
+  const fallbackEnabled = !disableFallback && maxAttempts > 1;
+  const fallbackAfter = fallbackEnabled
+    ? Math.min(
+      maxAttempts - 1,
+      Math.max(1, Number.isFinite(fallbackAfterAttempts) ? fallbackAfterAttempts : Math.ceil(maxAttempts * 0.8))
+    )
+    : Number.POSITIVE_INFINITY;
 
   for (let attempt = 1; attempt <= maxAttempts; attempt++) {
     log(`Polling 163 Mail... attempt ${attempt}/${maxAttempts}`);
@@ -142,7 +148,7 @@ async function handlePollEmail(step, payload) {
     await sleep(1000);
 
     const allItems = findMailItems();
-    const useFallback = attempt > fallbackAfter;
+    const useFallback = fallbackEnabled && attempt > fallbackAfter;
 
     for (const item of allItems) {
       const id = item.getAttribute('id') || '';
@@ -188,7 +194,7 @@ async function handlePollEmail(step, payload) {
       }
     }
 
-    if (attempt === fallbackAfter + 1) {
+    if (fallbackEnabled && attempt === fallbackAfter + 1) {
       log(`Step ${step}: No new emails after ${fallbackAfter} attempts, falling back to first match`, 'warn');
     }
 
