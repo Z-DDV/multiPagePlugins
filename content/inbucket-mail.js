@@ -171,6 +171,7 @@ async function handleMailboxPollEmail(step, payload) {
     subjectFilters = [],
     maxAttempts = 20,
     intervalMs = 3000,
+    fallbackAfterAttempts,
   } = payload || {};
 
   log(`Step ${step}: Starting email poll on Inbucket mailbox page (max ${maxAttempts} attempts)`);
@@ -185,7 +186,10 @@ async function handleMailboxPollEmail(step, payload) {
   const existingMailIds = getCurrentMailboxIds();
   log(`Step ${step}: Snapshotted ${existingMailIds.size} existing mailbox messages`);
 
-  const FALLBACK_AFTER = 3;
+  const fallbackAfter = Math.min(
+    maxAttempts - 1,
+    Math.max(1, Number.isFinite(fallbackAfterAttempts) ? fallbackAfterAttempts : Math.ceil(maxAttempts * 0.8))
+  );
 
   for (let attempt = 1; attempt <= maxAttempts; attempt++) {
     log(`Polling Inbucket mailbox... attempt ${attempt}/${maxAttempts}`);
@@ -195,7 +199,7 @@ async function handleMailboxPollEmail(step, payload) {
     }
 
     const entries = Array.from(findMailboxEntries()).map(parseMailboxEntry);
-    const useFallback = attempt > FALLBACK_AFTER;
+    const useFallback = attempt > fallbackAfter;
     const candidates = [];
 
     for (const mail of entries) {
@@ -233,7 +237,7 @@ async function handleMailboxPollEmail(step, payload) {
       };
     }
 
-    if (attempt === FALLBACK_AFTER + 1) {
+    if (attempt === fallbackAfter + 1) {
       log(`Step ${step}: No new mailbox messages yet, falling back to older matching messages`, 'warn');
     }
 

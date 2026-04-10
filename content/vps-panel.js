@@ -89,6 +89,10 @@ function normalizeText(text) {
   return String(text || '').replace(/\s+/g, ' ').trim();
 }
 
+function isOAuthCallbackTimeoutText(text) {
+  return /认证失败[:：]?\s*Timeout waiting for OAuth callback|Timeout waiting for OAuth callback/i.test(String(text || ''));
+}
+
 function findButtonByText(root, pattern) {
   if (!root) return null;
   const buttons = root.querySelectorAll('button');
@@ -190,11 +194,14 @@ async function waitForSubmitResultInCard(card, timeout = 30000) {
     const fullText = normalizeText(card.textContent || '');
     const text = `${statusText} ${fullText}`.trim();
 
+    if (isOAuthCallbackTimeoutText(text)) {
+      return { status: 'error', detail: '认证失败: Timeout waiting for OAuth callback', code: 'oauth_callback_timeout' };
+    }
     if (/认证成功|已提交|submitted|authorization\s*success|status:\s*success|已成功/i.test(text)) {
       return { status: 'success', detail: statusText || 'success' };
     }
-    if (/提交回调失败|submit\s*callback\s*failed|failed|错误|error|invalid/i.test(statusText)) {
-      return { status: 'error', detail: statusText || 'error' };
+    if (/提交回调失败|submit\s*callback\s*failed|认证失败|failed|错误|error|invalid/i.test(text)) {
+      return { status: 'error', detail: statusText || fullText || 'error' };
     }
 
     await sleep(260);
@@ -327,11 +334,11 @@ async function step9_vpsVerify(payload) {
   const result = await adapter.waitSubmitResult(card);
   if (result.status === 'success') {
     log('Step 9: Authentication successful!', 'ok');
-  } else if (result.status === 'error') {
-    log(`Step 9: Callback submit returned error state: "${result.detail}"`, 'warn');
-  } else {
-    log(`Step 9: ${result.detail}`, 'warn');
+    reportComplete(9);
+    return;
   }
 
-  reportComplete(9);
+  const message = result.detail || 'Callback submit did not complete successfully.';
+  log(`Step 9: ${message}`, 'warn');
+  throw new Error(message);
 }

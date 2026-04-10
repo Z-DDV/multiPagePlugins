@@ -96,7 +96,14 @@ function getCurrentMailIds() {
 // ============================================================
 
 async function handlePollEmail(step, payload) {
-  const { senderFilters, subjectFilters, maxAttempts, intervalMs, filterAfterTimestamp = 0 } = payload;
+  const {
+    senderFilters,
+    subjectFilters,
+    maxAttempts,
+    intervalMs,
+    filterAfterTimestamp = 0,
+    fallbackAfterAttempts,
+  } = payload;
 
   log(`Step ${step}: Starting email poll on 163 Mail (max ${maxAttempts} attempts)`);
 
@@ -123,7 +130,10 @@ async function handlePollEmail(step, payload) {
   const existingMailIds = getCurrentMailIds();
   log(`Step ${step}: Snapshotted ${existingMailIds.size} existing emails`);
 
-  const FALLBACK_AFTER = 3;
+  const fallbackAfter = Math.min(
+    maxAttempts - 1,
+    Math.max(1, Number.isFinite(fallbackAfterAttempts) ? fallbackAfterAttempts : Math.ceil(maxAttempts * 0.8))
+  );
 
   for (let attempt = 1; attempt <= maxAttempts; attempt++) {
     log(`Polling 163 Mail... attempt ${attempt}/${maxAttempts}`);
@@ -132,7 +142,7 @@ async function handlePollEmail(step, payload) {
     await sleep(1000);
 
     const allItems = findMailItems();
-    const useFallback = attempt > FALLBACK_AFTER;
+    const useFallback = attempt > fallbackAfter;
 
     for (const item of allItems) {
       const id = item.getAttribute('id') || '';
@@ -178,8 +188,8 @@ async function handlePollEmail(step, payload) {
       }
     }
 
-    if (attempt === FALLBACK_AFTER + 1) {
-      log(`Step ${step}: No new emails after ${FALLBACK_AFTER} attempts, falling back to first match`, 'warn');
+    if (attempt === fallbackAfter + 1) {
+      log(`Step ${step}: No new emails after ${fallbackAfter} attempts, falling back to first match`, 'warn');
     }
 
     if (attempt < maxAttempts) {

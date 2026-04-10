@@ -9,6 +9,30 @@ const HUMAN_STEP_DELAY_MIN = 700;
 const HUMAN_STEP_DELAY_MAX = 2200;
 const VPS_TYPE_CPAMC = 'Cli-Proxy-API-Management-Center';
 const VPS_TYPE_CODE_PROXY = 'codeProxy';
+const AUTH_FLOW_MAX_RECOVERY_ATTEMPTS = 5;
+const DUCK_AUTO_FETCH_MAX_ATTEMPTS = 5;
+const VERIFICATION_POLL_SETTINGS = {
+  maxAttempts: 45,
+  intervalMs: 5000,
+  fallbackAfterAttempts: 42,
+  freemailRelaxAfterAttempts: 43,
+};
+const OPENAI_SITE_DATA_ORIGINS = [
+  'https://openai.com',
+  'https://chatgpt.com',
+  'https://auth.openai.com',
+  'https://auth0.openai.com',
+  'https://accounts.openai.com',
+];
+const OPENAI_SITE_DATA_TYPES = {
+  cache: true,
+  cacheStorage: true,
+  cookies: true,
+  indexedDB: true,
+  localStorage: true,
+  serviceWorkers: true,
+  webSQL: true,
+};
 
 initializeSessionStorageAccess();
 
@@ -149,6 +173,27 @@ async function resetState() {
     freemailJwtToken: prev.freemailJwtToken || '',
     freemailDomain: prev.freemailDomain || '',
   });
+}
+
+async function clearOpenAiSiteDataForNewRun(contextLabel = 'new run') {
+  if (!chrome.browsingData?.remove) {
+    await addLog(`OpenAI site data cleanup unavailable before ${contextLabel}: browsingData permission missing.`, 'warn');
+    return;
+  }
+
+  await addLog(`Clearing OpenAI site cookies/cache before ${contextLabel}...`, 'info');
+  try {
+    await chrome.browsingData.remove(
+      {
+        since: 0,
+        origins: OPENAI_SITE_DATA_ORIGINS,
+      },
+      OPENAI_SITE_DATA_TYPES
+    );
+    await addLog(`OpenAI site cookies/cache cleared before ${contextLabel}.`, 'ok');
+  } catch (err) {
+    await addLog(`Failed to clear OpenAI site data before ${contextLabel}: ${err.message}`, 'warn');
+  }
 }
 
 /**
@@ -446,6 +491,67 @@ async function setStepStatus(step, status) {
   }).catch(() => {});
 }
 
+function buildResetUpdatesFromStep(step) {
+  const updates = {};
+
+  if (step <= 1) {
+    updates.oauthUrl = null;
+    updates.flowStartTime = null;
+  }
+  if (step <= 3) {
+    updates.password = null;
+  }
+  if (step <= 4) {
+    updates.lastEmailTimestamp = null;
+    updates.lastSignupCode = null;
+  }
+  if (step <= 8) {
+    updates.localhostUrl = null;
+  }
+
+  return updates;
+}
+
+async function invalidateFutureState(step, reason = '') {
+  const state = await getState();
+  const statuses = { ...state.stepStatuses };
+  const changedSteps = [];
+
+  for (let index = step + 1; index <= 9; index++) {
+    if (statuses[index] !== 'pending') {
+      statuses[index] = 'pending';
+      changedSteps.push(index);
+    }
+  }
+
+  const updates = {
+    stepStatuses: statuses,
+    ...buildResetUpdatesFromStep(step),
+  };
+
+  await setState(updates);
+
+  for (const changedStep of changedSteps) {
+    chrome.runtime.sendMessage({
+      type: 'STEP_STATUS_CHANGED',
+      payload: { step: changedStep, status: 'pending' },
+    }).catch(() => {});
+  }
+
+  const dataPayload = {};
+  if (Object.prototype.hasOwnProperty.call(updates, 'oauthUrl')) dataPayload.oauthUrl = updates.oauthUrl;
+  if (Object.prototype.hasOwnProperty.call(updates, 'password')) dataPayload.password = updates.password;
+  if (Object.prototype.hasOwnProperty.call(updates, 'localhostUrl')) dataPayload.localhostUrl = updates.localhostUrl;
+  if (Object.keys(dataPayload).length) {
+    broadcastDataUpdate(dataPayload);
+  }
+
+  if (changedSteps.length || reason) {
+    const detail = changedSteps.length ? `reset future steps ${changedSteps.join(', ')}` : 'cleared related future state';
+    await addLog(`Step ${step}: ${detail}${reason ? ` (${reason})` : ''}`, 'info');
+  }
+}
+
 function isStopError(error) {
   const message = typeof error === 'string' ? error : error?.message;
   return message === STOP_ERROR_MESSAGE;
@@ -617,11 +723,19 @@ async function handleMessage(message, sender) {
     case 'EXECUTE_STEP': {
       clearStopRequest();
       const step = message.payload.step;
+      const currentState = await getState();
+      if (step === 1 && currentState.currentStep === 0) {
+        await clearOpenAiSiteDataForNewRun('manual step 1 start');
+      }
       // Save email if provided (from side panel step 3)
       if (message.payload.email) {
         await setEmailState(message.payload.email);
       }
-      await executeStep(step);
+      if (step >= 7 && step <= 9) {
+        await executeManualStepWithRecovery(step);
+      } else {
+        await executeStep(step);
+      }
       return { ok: true };
     }
 
@@ -797,16 +911,16 @@ async function requestStop() {
 async function executeStep(step) {
   console.log(LOG_PREFIX, `Executing step ${step}`);
   throwIfStopped();
+  await invalidateFutureState(step);
   await setStepStatus(step, 'running');
   await addLog(`Step ${step} started`);
   await humanStepDelay();
 
-  const state = await getState();
-
-  // Set flow start time on first step
-  if (step === 1 && !state.flowStartTime) {
+  if (step === 1) {
     await setState({ flowStartTime: Date.now() });
   }
+
+  const state = await getState();
 
   try {
     switch (step) {
@@ -847,6 +961,77 @@ async function executeStepAndWait(step, delayAfter = 2000) {
   // Extra delay for page transitions / DOM updates
   if (delayAfter > 0) {
     await sleepWithStop(delayAfter + Math.floor(Math.random() * 1200));
+  }
+}
+
+function withStepContext(step, err) {
+  if (err && typeof err === 'object' && err.step == null) {
+    err.step = step;
+  }
+  return err;
+}
+
+function isRecoverableAuthError(step, err) {
+  const message = String(err?.message || err || '');
+  if (!message) return false;
+
+  if (step === 7) {
+    return /verification code|验证码|not found in time|Could not find verification code input|No verification code provided/i.test(message);
+  }
+  if (step === 8) {
+    return /Localhost redirect not captured|debugger click|继续" button|OAuth consent|redirect/i.test(message);
+  }
+  if (step === 9) {
+    return /Timeout waiting for OAuth callback|OAuth callback timeout|callback timeout|认证失败[:：]?\s*Timeout waiting for OAuth callback/i.test(message);
+  }
+  return false;
+}
+
+async function executeAuthorizationFlowWithRecovery(maxAttempts = AUTH_FLOW_MAX_RECOVERY_ATTEMPTS) {
+  for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+    try {
+      await executeStepAndWait(6, 3000);
+      try {
+        await executeStepAndWait(7, 2000);
+      } catch (err) {
+        throw withStepContext(7, err);
+      }
+      try {
+        await executeStepAndWait(8, 2000);
+      } catch (err) {
+        throw withStepContext(8, err);
+      }
+      try {
+        await executeStepAndWait(9, 1000);
+      } catch (err) {
+        throw withStepContext(9, err);
+      }
+      return;
+    } catch (err) {
+      const failedStep = err?.step || 6;
+      if (attempt >= maxAttempts || !isRecoverableAuthError(failedStep, err)) {
+        throw err;
+      }
+
+      await addLog(
+        `Auth recovery ${attempt}/${maxAttempts}: step ${failedStep} failed with recoverable error: ${err.message}. Restarting from step 6...`,
+        'warn'
+      );
+      await invalidateFutureState(6, 'authorization recovery');
+    }
+  }
+}
+
+async function executeManualStepWithRecovery(step) {
+  try {
+    await executeStep(step);
+  } catch (err) {
+    if (step >= 7 && step <= 9 && isRecoverableAuthError(step, err)) {
+      await addLog(`Step ${step}: recoverable auth error detected. Restarting authorization from step 6...`, 'warn');
+      await executeAuthorizationFlowWithRecovery();
+      return;
+    }
+    throw err;
   }
 }
 
@@ -1110,6 +1295,7 @@ async function pollFreemailVerificationCode(state, options = {}) {
     maxAttempts = 20,
     intervalMs = 3000,
     excludeCodes = [],
+    relaxTimestampAfterAttempts = Math.ceil(maxAttempts / 2),
   } = options;
 
   const seenMessageIds = new Set();
@@ -1137,7 +1323,7 @@ async function pollFreemailVerificationCode(state, options = {}) {
       } catch {}
     }
 
-    const relaxedTimestampFilter = attempt > Math.ceil(maxAttempts / 2);
+    const relaxedTimestampFilter = attempt > relaxTimestampAfterAttempts;
     for (const message of messages) {
       const emailTimestamp = parseFreemailMessageTimestamp(message);
       if (
@@ -1165,7 +1351,7 @@ async function pollFreemailVerificationCode(state, options = {}) {
     }
 
     if (attempt < maxAttempts) {
-      const mode = attempt > Math.ceil(maxAttempts / 2) ? 'relaxed-time' : 'strict-time';
+      const mode = attempt > relaxTimestampAfterAttempts ? 'relaxed-time' : 'strict-time';
       await addLog(`Step ${step}: Freemail polling attempt ${attempt}/${maxAttempts} (${mode}), no new code yet...`, 'info');
       await sleepWithStop(intervalMs);
     }
@@ -1179,6 +1365,30 @@ async function fetchEmailForProvider(provider, state, options = {}) {
     return fetchFreemailEmail(state);
   }
   return fetchDuckEmail(options);
+}
+
+async function fetchEmailForProviderWithRetries(provider, state, options = {}) {
+  if (provider === 'freemail') {
+    return fetchFreemailEmail(state);
+  }
+
+  let lastError = null;
+  for (let attempt = 1; attempt <= DUCK_AUTO_FETCH_MAX_ATTEMPTS; attempt++) {
+    try {
+      if (attempt > 1) {
+        await addLog(`Duck Mail: retrying auto fetch (${attempt}/${DUCK_AUTO_FETCH_MAX_ATTEMPTS})...`, 'info');
+      }
+      return await fetchDuckEmail(options);
+    } catch (err) {
+      lastError = err;
+      await addLog(`Duck Mail auto-fetch attempt ${attempt}/${DUCK_AUTO_FETCH_MAX_ATTEMPTS} failed: ${err.message}`, 'warn');
+      if (attempt < DUCK_AUTO_FETCH_MAX_ATTEMPTS) {
+        await sleepWithStop(1500);
+      }
+    }
+  }
+
+  throw lastError || new Error('Duck Mail auto-fetch failed.');
 }
 
 // ============================================================
@@ -1222,6 +1432,7 @@ async function autoRunLoop(totalRuns) {
     // Tell side panel to reset all UI
     chrome.runtime.sendMessage({ type: 'AUTO_RUN_RESET' }).catch(() => {});
     await sleepWithStop(500);
+    await clearOpenAiSiteDataForNewRun(`auto run ${run}/${totalRuns}`);
 
     await addLog(`=== Auto Run ${run}/${totalRuns} — Phase 1: Get OAuth link & open signup ===`, 'info');
     const status = (phase) => ({ type: 'AUTO_RUN_STATUS', payload: { phase, currentRun: run, totalRuns } });
@@ -1237,7 +1448,7 @@ async function autoRunLoop(totalRuns) {
       const provider = (prevState.mailProvider || '163').trim();
       try {
         const currentState = await getState();
-        const autoEmail = await fetchEmailForProvider(provider, currentState, { generateNew: true });
+        const autoEmail = await fetchEmailForProviderWithRetries(provider, currentState, { generateNew: true });
         const providerLabel = provider === 'freemail' ? 'Freemail' : 'Duck Mail';
         await addLog(`=== Run ${run}/${totalRuns} — ${providerLabel} email ready: ${autoEmail} ===`, 'ok');
         emailReady = true;
@@ -1274,10 +1485,7 @@ async function autoRunLoop(totalRuns) {
       await executeStepAndWait(3, 3000);
       await executeStepAndWait(4, 2000);
       await executeStepAndWait(5, 3000);
-      await executeStepAndWait(6, 3000);
-      await executeStepAndWait(7, 2000);
-      await executeStepAndWait(8, 2000);
-      await executeStepAndWait(9, 1000);
+      await executeAuthorizationFlowWithRecovery();
 
       await addLog(`=== Run ${run}/${totalRuns} COMPLETE! ===`, 'ok');
 
@@ -1470,6 +1678,7 @@ async function clickResendOnSignupPage(step) {
 }
 
 async function executeStep4(state) {
+  const stepStartTimestamp = Date.now();
   // Click "重新发送电子邮件" on the signup page before polling
   await clickResendOnSignupPage(4);
 
@@ -1480,9 +1689,10 @@ async function executeStep4(state) {
   if (mail.apiDriven) {
     const result = await pollFreemailVerificationCode(state, {
       step: 4,
-      filterAfterTimestamp: state.flowStartTime || 0,
-      maxAttempts: 20,
-      intervalMs: 3000,
+      filterAfterTimestamp: stepStartTimestamp,
+      maxAttempts: VERIFICATION_POLL_SETTINGS.maxAttempts,
+      intervalMs: VERIFICATION_POLL_SETTINGS.intervalMs,
+      relaxTimestampAfterAttempts: VERIFICATION_POLL_SETTINGS.freemailRelaxAfterAttempts,
     });
 
     await setState({ lastEmailTimestamp: result.emailTimestamp, lastSignupCode: result.code });
@@ -1526,12 +1736,13 @@ async function executeStep4(state) {
     step: 4,
     source: 'background',
     payload: {
-      filterAfterTimestamp: state.flowStartTime || 0,
+      filterAfterTimestamp: stepStartTimestamp,
       senderFilters: ['openai', 'noreply', 'verify', 'auth', 'duckduckgo', 'forward'],
       subjectFilters: ['verify', 'verification', 'code', '验证', 'confirm'],
       targetEmail: state.email,
-      maxAttempts: 20,
-      intervalMs: 3000,
+      maxAttempts: VERIFICATION_POLL_SETTINGS.maxAttempts,
+      intervalMs: VERIFICATION_POLL_SETTINGS.intervalMs,
+      fallbackAfterAttempts: VERIFICATION_POLL_SETTINGS.fallbackAfterAttempts,
     },
   });
 
@@ -1607,6 +1818,7 @@ async function executeStep6(state) {
 // ============================================================
 
 async function executeStep7(state) {
+  const stepStartTimestamp = Date.now();
   // Click "重新发送电子邮件" on the auth page before polling
   await clickResendOnSignupPage(7);
 
@@ -1617,9 +1829,10 @@ async function executeStep7(state) {
   if (mail.apiDriven) {
     const result = await pollFreemailVerificationCode(state, {
       step: 7,
-      filterAfterTimestamp: state.lastEmailTimestamp || state.flowStartTime || 0,
-      maxAttempts: 20,
-      intervalMs: 3000,
+      filterAfterTimestamp: stepStartTimestamp,
+      maxAttempts: VERIFICATION_POLL_SETTINGS.maxAttempts,
+      intervalMs: VERIFICATION_POLL_SETTINGS.intervalMs,
+      relaxTimestampAfterAttempts: VERIFICATION_POLL_SETTINGS.freemailRelaxAfterAttempts,
       excludeCodes: state.lastSignupCode ? [state.lastSignupCode] : [],
     });
 
@@ -1661,12 +1874,13 @@ async function executeStep7(state) {
     step: 7,
     source: 'background',
     payload: {
-      filterAfterTimestamp: state.lastEmailTimestamp || state.flowStartTime || 0,
+      filterAfterTimestamp: stepStartTimestamp,
       senderFilters: ['openai', 'noreply', 'verify', 'auth', 'chatgpt', 'duckduckgo', 'forward'],
       subjectFilters: ['verify', 'verification', 'code', '验证', 'confirm', 'login'],
       targetEmail: state.email,
-      maxAttempts: 20,
-      intervalMs: 3000,
+      maxAttempts: VERIFICATION_POLL_SETTINGS.maxAttempts,
+      intervalMs: VERIFICATION_POLL_SETTINGS.intervalMs,
+      fallbackAfterAttempts: VERIFICATION_POLL_SETTINGS.fallbackAfterAttempts,
     },
   });
 
@@ -1859,7 +2073,7 @@ async function executeStep9(state) {
 
   // Send command directly — bypass queue/ready mechanism
   await addLog(`Step 9: Filling callback URL...`);
-  await chrome.tabs.sendMessage(tabId, {
+  const response = await chrome.tabs.sendMessage(tabId, {
     type: 'EXECUTE_STEP',
     step: 9,
     source: 'background',
@@ -1868,6 +2082,9 @@ async function executeStep9(state) {
       vpsType: normalizeVpsType(state.vpsType),
     },
   });
+  if (response?.error) {
+    throw new Error(response.error);
+  }
 }
 
 // ============================================================

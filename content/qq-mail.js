@@ -55,7 +55,7 @@ function getCurrentMailIds() {
 // ============================================================
 
 async function handlePollEmail(step, payload) {
-  const { senderFilters, subjectFilters, maxAttempts, intervalMs } = payload;
+  const { senderFilters, subjectFilters, maxAttempts, intervalMs, fallbackAfterAttempts } = payload;
 
   log(`Step ${step}: Starting email poll (max ${maxAttempts} attempts, every ${intervalMs / 1000}s)`);
 
@@ -71,9 +71,10 @@ async function handlePollEmail(step, payload) {
   const existingMailIds = getCurrentMailIds();
   log(`Step ${step}: Snapshotted ${existingMailIds.size} existing emails as "old"`);
 
-  // Fallback after just 3 attempts (~10s). In practice, the email is usually
-  // already in the list but has the same mailid (page was already open).
-  const FALLBACK_AFTER = 3;
+  const fallbackAfter = Math.min(
+    maxAttempts - 1,
+    Math.max(1, Number.isFinite(fallbackAfterAttempts) ? fallbackAfterAttempts : Math.ceil(maxAttempts * 0.8))
+  );
 
   for (let attempt = 1; attempt <= maxAttempts; attempt++) {
     log(`Polling QQ Mail... attempt ${attempt}/${maxAttempts}`);
@@ -85,10 +86,10 @@ async function handlePollEmail(step, payload) {
     }
 
     const allItems = document.querySelectorAll('.mail-list-page-item[data-mailid]');
-    const useFallback = attempt > FALLBACK_AFTER;
+    const useFallback = attempt > fallbackAfter;
 
-    // Phase 1 (attempt 1~3): only look at NEW emails (not in snapshot)
-    // Phase 2 (attempt 4+): fallback to first matching email in list
+    // Phase 1: only look at NEW emails (not in snapshot)
+    // Phase 2: fallback to first matching email in list near the end of the polling window
     for (const item of allItems) {
       const mailId = item.getAttribute('data-mailid');
 
@@ -111,8 +112,8 @@ async function handlePollEmail(step, payload) {
       }
     }
 
-    if (attempt === FALLBACK_AFTER + 1) {
-      log(`Step ${step}: No new emails after ${FALLBACK_AFTER} attempts, falling back to first matching email`, 'warn');
+    if (attempt === fallbackAfter + 1) {
+      log(`Step ${step}: No new emails after ${fallbackAfter} attempts, falling back to first matching email`, 'warn');
     }
 
     if (attempt < maxAttempts) {
