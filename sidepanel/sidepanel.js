@@ -38,6 +38,9 @@ const inputFreemailJwtToken = document.getElementById('input-freemail-jwt-token'
 const rowFreemailDomain = document.getElementById('row-freemail-domain');
 const inputFreemailDomain = document.getElementById('input-freemail-domain');
 const inputRunCount = document.getElementById('input-run-count');
+const DEFAULT_VPS_URL = 'https://ddvcode.zeabur.app/manage/oauth';
+const DEFAULT_VPS_TYPE = 'codeProxy';
+const DEFAULT_MAIL_PROVIDER = 'qq';
 
 // ============================================================
 // Toast Notifications
@@ -91,15 +94,9 @@ async function restoreState() {
       inputEmail.value = state.email;
     }
     syncPasswordField(state);
-    if (state.vpsUrl) {
-      inputVpsUrl.value = state.vpsUrl;
-    }
-    if (state.vpsType) {
-      selectVpsType.value = state.vpsType;
-    }
-    if (state.mailProvider) {
-      selectMailProvider.value = state.mailProvider;
-    }
+    inputVpsUrl.value = state.vpsUrl || DEFAULT_VPS_URL;
+    selectVpsType.value = state.vpsType || DEFAULT_VPS_TYPE;
+    selectMailProvider.value = state.mailProvider || DEFAULT_MAIL_PROVIDER;
     if (state.inbucketHost) {
       inputInbucketHost.value = state.inbucketHost;
     }
