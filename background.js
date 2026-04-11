@@ -996,6 +996,45 @@ function isRecoverableAuthError(step, err) {
   return false;
 }
 
+function isOAuthCallbackTimeoutError(err) {
+  const message = String(err?.message || err || '');
+  return /Timeout waiting for OAuth callback|OAuth callback timeout|callback timeout/i.test(message);
+}
+
+function shouldRefreshOAuthUrlDuringAuthRecovery(state, failedStep, err) {
+  return (
+    failedStep === 9
+    && normalizeVpsType(state?.vpsType) === VPS_TYPE_CODE_PROXY
+    && isOAuthCallbackTimeoutError(err)
+  );
+}
+
+async function refreshOAuthUrlForAuthorizationRecovery() {
+  throwIfStopped();
+  const state = await getState();
+  if (!state.vpsUrl) {
+    throw new Error('VPS URL not set. Cannot refresh OAuth URL for authorization recovery.');
+  }
+
+  await addLog('Auth recovery: refreshing OAuth URL via step 1 before retrying authorization...', 'warn');
+  await setStepStatus(1, 'running');
+
+  const waitForRefresh = waitForStepComplete(1, getStepCompletionTimeout(1));
+  try {
+    await executeStep1(state);
+    await waitForRefresh;
+    await sleepWithStop(1500);
+  } catch (err) {
+    if (isStopError(err)) {
+      await setStepStatus(1, 'stopped');
+      throw err;
+    }
+    await setStepStatus(1, 'failed');
+    await addLog(`Auth recovery: step 1 refresh failed: ${err.message}`, 'error');
+    throw err;
+  }
+}
+
 async function executeAuthorizationFlowWithRecovery(maxAttempts = AUTH_FLOW_MAX_RECOVERY_ATTEMPTS) {
   for (let attempt = 1; attempt <= maxAttempts; attempt++) {
     try {
@@ -1022,11 +1061,22 @@ async function executeAuthorizationFlowWithRecovery(maxAttempts = AUTH_FLOW_MAX_
         throw err;
       }
 
+      await invalidateFutureState(6, 'authorization recovery');
+
+      const state = await getState();
+      if (shouldRefreshOAuthUrlDuringAuthRecovery(state, failedStep, err)) {
+        await addLog(
+          `Auth recovery ${attempt}/${maxAttempts}: step ${failedStep} hit an expired codeProxy OAuth callback (${err.message}). Refreshing step 1, then restarting from step 6...`,
+          'warn'
+        );
+        await refreshOAuthUrlForAuthorizationRecovery();
+        continue;
+      }
+
       await addLog(
         `Auth recovery ${attempt}/${maxAttempts}: step ${failedStep} failed with recoverable error: ${err.message}. Restarting from step 6...`,
         'warn'
       );
-      await invalidateFutureState(6, 'authorization recovery');
     }
   }
 }
@@ -1036,7 +1086,12 @@ async function executeManualStepWithRecovery(step) {
     await executeStep(step);
   } catch (err) {
     if (step >= 7 && step <= 9 && isRecoverableAuthError(step, err)) {
-      await addLog(`Step ${step}: recoverable auth error detected. Restarting authorization from step 6...`, 'warn');
+      const state = await getState();
+      if (shouldRefreshOAuthUrlDuringAuthRecovery(state, step, err)) {
+        await addLog(`Step ${step}: codeProxy OAuth callback expired. Refreshing step 1, then restarting authorization from step 6...`, 'warn');
+      } else {
+        await addLog(`Step ${step}: recoverable auth error detected. Restarting authorization from step 6...`, 'warn');
+      }
       await executeAuthorizationFlowWithRecovery();
       return;
     }
