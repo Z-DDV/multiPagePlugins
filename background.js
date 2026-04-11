@@ -29,6 +29,10 @@ const OPENAI_SITE_DATA_ORIGINS = [
   'https://auth0.openai.com',
   'https://accounts.openai.com',
 ];
+const OPENAI_SITE_DATA_HOSTS = [
+  'openai.com',
+  'chatgpt.com',
+];
 const OPENAI_SITE_DATA_TYPES = {
   cache: true,
   cacheStorage: true,
@@ -186,7 +190,7 @@ async function clearOpenAiSiteDataForNewRun(contextLabel = 'new run') {
     return;
   }
 
-  await addLog(`Clearing OpenAI site cookies/cache before ${contextLabel}...`, 'info');
+  await addLog(`Clearing OpenAI site cookies/cache/storage before ${contextLabel}...`, 'info');
   try {
     await chrome.browsingData.remove(
       {
@@ -195,10 +199,85 @@ async function clearOpenAiSiteDataForNewRun(contextLabel = 'new run') {
       },
       OPENAI_SITE_DATA_TYPES
     );
-    await addLog(`OpenAI site cookies/cache cleared before ${contextLabel}.`, 'ok');
+    await addLog(`OpenAI site cookies/cache/storage cleared before ${contextLabel}.`, 'ok');
   } catch (err) {
     await addLog(`Failed to clear OpenAI site data before ${contextLabel}: ${err.message}`, 'warn');
   }
+
+  try {
+    const { clearedTabs, failedTabs } = await clearOpenAiTabSessionStorage(contextLabel);
+    if (clearedTabs > 0 || failedTabs > 0) {
+      await addLog(
+        `OpenAI tab sessionStorage cleanup before ${contextLabel}: cleared ${clearedTabs}, failed ${failedTabs}.`,
+        failedTabs > 0 ? 'warn' : 'ok'
+      );
+    }
+  } catch (err) {
+    await addLog(`Failed to clear OpenAI tab sessionStorage before ${contextLabel}: ${err.message}`, 'warn');
+  }
+}
+
+function isOpenAiSiteUrl(rawUrl = '') {
+  const value = String(rawUrl || '').trim();
+  if (!value || value.startsWith('chrome://')) return false;
+
+  try {
+    const parsed = new URL(value);
+    return OPENAI_SITE_DATA_HOSTS.some((host) => parsed.host === host || parsed.host.endsWith(`.${host}`));
+  } catch {
+    return false;
+  }
+}
+
+async function clearOpenAiTabSessionStorage(contextLabel = 'new run') {
+  if (!chrome.scripting?.executeScript) {
+    await addLog(`OpenAI tab sessionStorage cleanup unavailable before ${contextLabel}: scripting permission missing.`, 'warn');
+    return { clearedTabs: 0, failedTabs: 0 };
+  }
+
+  const allTabs = await chrome.tabs.query({});
+  const candidateTabs = allTabs.filter((tab) => tab?.id && isOpenAiSiteUrl(getTabCandidateUrl(tab)));
+  if (!candidateTabs.length) {
+    return { clearedTabs: 0, failedTabs: 0 };
+  }
+
+  const results = await Promise.allSettled(
+    candidateTabs.map((tab) => chrome.scripting.executeScript({
+      target: { tabId: tab.id },
+      func: () => {
+        const result = {
+          href: location.href,
+          sessionStorageCleared: false,
+          localStorageCleared: false,
+        };
+
+        try {
+          window.sessionStorage?.clear();
+          result.sessionStorageCleared = true;
+        } catch {}
+
+        try {
+          window.localStorage?.clear();
+          result.localStorageCleared = true;
+        } catch {}
+
+        return result;
+      },
+    }))
+  );
+
+  let clearedTabs = 0;
+  let failedTabs = 0;
+  for (const outcome of results) {
+    if (outcome.status === 'fulfilled') {
+      clearedTabs += 1;
+    } else {
+      failedTabs += 1;
+      console.warn(LOG_PREFIX, 'OpenAI tab sessionStorage cleanup failed:', outcome.reason?.message || outcome.reason);
+    }
+  }
+
+  return { clearedTabs, failedTabs };
 }
 
 /**
