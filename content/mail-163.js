@@ -13,6 +13,7 @@ const MAIL163_INBOX_HASH = 'module=mbox.ListModule%7C%7B%22fid%22%3A1%2C%22order
 const MAIL163_INBOX_LABEL = '\u6536\u4ef6\u7bb1';
 const MAIL163_REFRESH_LABEL = '\u5237\u65b0';
 const MAIL163_RECEIVE_LABEL = '\u6536\u4fe1';
+const MAIL163_LIST_MESSAGES_XML = '<?xml version="1.0"?><object><int name="fid">1</int><string name="order">date</string><boolean name="desc">true</boolean><int name="limit">20</int><int name="start">0</int><boolean name="skipLockedFolders">false</boolean><string name="topFlag">top</string><boolean name="returnTag">true</boolean><boolean name="returnTotal">true</boolean></object>';
 
 console.log(MAIL163_PREFIX, 'Content script loaded on', location.href, 'frame:', isTopFrame ? 'top' : 'child');
 
@@ -23,6 +24,7 @@ if (!isTopFrame) {
 
 // Track codes we've already seen — persisted in chrome.storage.session to survive script re-injection
 let seenCodes = new Set();
+let structuredApiProbeLogged = false;
 
 async function loadSeenCodes() {
   try {
@@ -86,6 +88,426 @@ function parseEmailDate(item) {
 
 function findMailItems() {
   return document.querySelectorAll('div[sign="letter"]');
+}
+
+function getMail163Sid() {
+  try {
+    const currentUrl = new URL(location.href);
+    const sidFromQuery = currentUrl.searchParams.get('sid');
+    if (sidFromQuery) return sidFromQuery;
+  } catch {}
+
+  const cookieMatch = document.cookie.match(/(?:^|;\s*)Coremail\.sid=([^;]+)/);
+  return cookieMatch ? decodeURIComponent(cookieMatch[1]) : '';
+}
+
+function parseMail163ApiDate(value) {
+  if (value == null || value === '') return 0;
+  if (value instanceof Date) return value.getTime();
+  if (typeof value === 'number' && Number.isFinite(value)) {
+    return value < 1e12 ? value * 1000 : value;
+  }
+
+  const parsed = Date.parse(String(value));
+  return Number.isNaN(parsed) ? 0 : parsed;
+}
+
+function parseCoremailXmlValue(node) {
+  if (!node) return null;
+
+  const tag = String(node.tagName || '').toLowerCase();
+  const text = node.textContent || '';
+
+  if (tag === 'string' || tag === 'date') return text;
+  if (tag === 'int' || tag === 'number') {
+    const numeric = Number(text);
+    return Number.isFinite(numeric) ? numeric : text;
+  }
+  if (tag === 'boolean') {
+    return /^(?:true|1)$/i.test(text.trim());
+  }
+  if (tag === 'array') {
+    return Array.from(node.children || []).map(child => parseCoremailXmlValue(child));
+  }
+  if (tag === 'object') {
+    const result = {};
+    for (const child of Array.from(node.children || [])) {
+      const key = child.getAttribute('name');
+      const value = parseCoremailXmlValue(child);
+      if (!key) continue;
+
+      if (Object.prototype.hasOwnProperty.call(result, key)) {
+        const current = result[key];
+        result[key] = Array.isArray(current) ? [...current, value] : [current, value];
+      } else {
+        result[key] = value;
+      }
+    }
+    return result;
+  }
+
+  return text;
+}
+
+function isMail163LiteralWhitespace(char) {
+  return /\s/.test(char);
+}
+
+function isMail163LiteralIdentifierStart(char) {
+  return /[A-Za-z_$]/.test(char);
+}
+
+function isMail163LiteralIdentifierPart(char) {
+  return /[A-Za-z0-9_$]/.test(char);
+}
+
+function parseMail163JsLiteral(rawText) {
+  const text = String(rawText || '').trim();
+  let index = 0;
+
+  function peek(offset = 0) {
+    return text[index + offset];
+  }
+
+  function skipWhitespace() {
+    while (index < text.length && isMail163LiteralWhitespace(text[index])) {
+      index += 1;
+    }
+  }
+
+  function expect(char) {
+    skipWhitespace();
+    if (text[index] !== char) {
+      throw new Error(`Expected "${char}" at position ${index}, got "${text[index] || 'EOF'}"`);
+    }
+    index += 1;
+  }
+
+  function parseString() {
+    skipWhitespace();
+    const quote = text[index];
+    if (quote !== '\'' && quote !== '"') {
+      throw new Error(`Expected string at position ${index}`);
+    }
+
+    index += 1;
+    let result = '';
+    while (index < text.length) {
+      const char = text[index];
+      if (char === '\\') {
+        const next = text[index + 1];
+        if (next == null) break;
+        if (next === 'n') result += '\n';
+        else if (next === 'r') result += '\r';
+        else if (next === 't') result += '\t';
+        else result += next;
+        index += 2;
+        continue;
+      }
+      if (char === quote) {
+        index += 1;
+        return result;
+      }
+      result += char;
+      index += 1;
+    }
+
+    throw new Error('Unterminated string literal.');
+  }
+
+  function parseIdentifier() {
+    skipWhitespace();
+    if (!isMail163LiteralIdentifierStart(peek())) {
+      throw new Error(`Expected identifier at position ${index}`);
+    }
+
+    const start = index;
+    index += 1;
+    while (index < text.length && isMail163LiteralIdentifierPart(peek())) {
+      index += 1;
+    }
+    return text.slice(start, index);
+  }
+
+  function parseNumber() {
+    skipWhitespace();
+    const start = index;
+    if (peek() === '-') index += 1;
+    while (/\d/.test(peek() || '')) index += 1;
+    if (peek() === '.') {
+      index += 1;
+      while (/\d/.test(peek() || '')) index += 1;
+    }
+    const raw = text.slice(start, index);
+    const value = Number(raw);
+    if (!Number.isFinite(value)) {
+      throw new Error(`Invalid number literal "${raw}" at position ${start}`);
+    }
+    return value;
+  }
+
+  function consumeKeyword(keyword) {
+    skipWhitespace();
+    if (text.slice(index, index + keyword.length) !== keyword) return false;
+    const next = text[index + keyword.length];
+    if (next && isMail163LiteralIdentifierPart(next)) return false;
+    index += keyword.length;
+    return true;
+  }
+
+  function parseDateConstructor() {
+    const identifier = parseIdentifier();
+    if (identifier !== 'new') {
+      throw new Error(`Unsupported identifier "${identifier}" at position ${index}`);
+    }
+
+    const ctor = parseIdentifier();
+    if (ctor !== 'Date') {
+      throw new Error(`Unsupported constructor "${ctor}" in mail-163 response.`);
+    }
+
+    expect('(');
+    const args = [];
+    skipWhitespace();
+    if (peek() !== ')') {
+      while (true) {
+        args.push(parseValue());
+        skipWhitespace();
+        if (peek() === ',') {
+          index += 1;
+          continue;
+        }
+        break;
+      }
+    }
+    expect(')');
+
+    const numericArgs = args.map((item) => Number(item));
+    if (numericArgs.some((item) => !Number.isFinite(item))) {
+      throw new Error('new Date(...) arguments are not numeric.');
+    }
+    return new Date(...numericArgs);
+  }
+
+  function parseArray() {
+    expect('[');
+    const result = [];
+    skipWhitespace();
+    if (peek() === ']') {
+      index += 1;
+      return result;
+    }
+
+    while (index < text.length) {
+      result.push(parseValue());
+      skipWhitespace();
+      const current = peek();
+      if (current === ',') {
+        index += 1;
+        continue;
+      }
+      if (current === ']') {
+        index += 1;
+        return result;
+      }
+      throw new Error(`Unexpected token "${current || 'EOF'}" in array at position ${index}`);
+    }
+
+    throw new Error('Unterminated array literal.');
+  }
+
+  function parseObjectKey() {
+    skipWhitespace();
+    const current = peek();
+    if (current === '\'' || current === '"') {
+      return parseString();
+    }
+    return parseIdentifier();
+  }
+
+  function parseObject() {
+    expect('{');
+    const result = {};
+    skipWhitespace();
+    if (peek() === '}') {
+      index += 1;
+      return result;
+    }
+
+    while (index < text.length) {
+      const key = parseObjectKey();
+      expect(':');
+      result[key] = parseValue();
+      skipWhitespace();
+      const current = peek();
+      if (current === ',') {
+        index += 1;
+        continue;
+      }
+      if (current === '}') {
+        index += 1;
+        return result;
+      }
+      throw new Error(`Unexpected token "${current || 'EOF'}" in object at position ${index}`);
+    }
+
+    throw new Error('Unterminated object literal.');
+  }
+
+  function parseValue() {
+    skipWhitespace();
+    const current = peek();
+    if (current === '{') return parseObject();
+    if (current === '[') return parseArray();
+    if (current === '\'' || current === '"') return parseString();
+    if (current === '-' || /\d/.test(current || '')) return parseNumber();
+
+    if (consumeKeyword('true')) return true;
+    if (consumeKeyword('false')) return false;
+    if (consumeKeyword('null')) return null;
+    if (consumeKeyword('undefined')) return null;
+
+    if (text.slice(index, index + 3) === 'new' && !isMail163LiteralIdentifierPart(text[index + 3] || '')) {
+      return parseDateConstructor();
+    }
+
+    throw new Error(`Unsupported token "${current || 'EOF'}" at position ${index}`);
+  }
+
+  const value = parseValue();
+  skipWhitespace();
+  if (peek() === ';') {
+    index += 1;
+    skipWhitespace();
+  }
+  if (index < text.length) {
+    throw new Error(`Unexpected trailing content at position ${index}`);
+  }
+  return value;
+}
+
+function parseMail163StructuredResponse(rawText) {
+  const trimmed = String(rawText || '').trim();
+  if (!trimmed) {
+    throw new Error('mail-163 listMessages response is empty.');
+  }
+
+  if (trimmed.startsWith('{') || trimmed.startsWith('[')) {
+    try {
+      return parseMail163JsLiteral(trimmed);
+    } catch (err) {
+      throw new Error(`mail-163 JS literal parse failed: ${err?.message || err}`);
+    }
+  }
+
+  const parser = new DOMParser();
+  const xmlDoc = parser.parseFromString(trimmed, 'text/xml');
+  if (xmlDoc.querySelector('parsererror')) {
+    throw new Error('mail-163 listMessages response is not parseable XML.');
+  }
+
+  return parseCoremailXmlValue(xmlDoc.documentElement);
+}
+
+function collectMail163ApiMessages(value, bucket = []) {
+  if (!value) return bucket;
+
+  if (Array.isArray(value)) {
+    value.forEach(item => collectMail163ApiMessages(item, bucket));
+    return bucket;
+  }
+
+  if (typeof value !== 'object') return bucket;
+
+  if (
+    typeof value.id === 'string'
+    && (typeof value.subject === 'string' || typeof value.from === 'string')
+  ) {
+    bucket.push(value);
+    return bucket;
+  }
+
+  Object.values(value).forEach(item => collectMail163ApiMessages(item, bucket));
+  return bucket;
+}
+
+function normalizeMail163StructuredMessage(message) {
+  return {
+    id: String(message.id || ''),
+    from: String(message.from || ''),
+    to: String(message.to || ''),
+    subject: String(message.subject || ''),
+    sentDate: parseMail163ApiDate(message.sentDate),
+    receivedDate: parseMail163ApiDate(message.receivedDate),
+    modifiedDate: parseMail163ApiDate(message.modifiedDate),
+  };
+}
+
+async function fetchMail163StructuredInbox(step, options = {}) {
+  const { logProbe = false } = options;
+  const sid = getMail163Sid();
+  if (!sid) {
+    throw new Error('Coremail sid not found on current page.');
+  }
+
+  const requestUrl = new URL('/js6/s', location.origin);
+  requestUrl.searchParams.set('sid', sid);
+  requestUrl.searchParams.set('func', 'mbox:listMessages');
+  requestUrl.searchParams.set('mbox_folder_enter', '1');
+  requestUrl.searchParams.set('LeftNavfolder1Click', '1');
+
+  const response = await fetch(requestUrl.toString(), {
+    method: 'POST',
+    credentials: 'include',
+    headers: {
+      Accept: 'text/javascript, text/xml, application/xml, text/plain, */*',
+      'Content-Type': 'application/x-www-form-urlencoded; charset=UTF-8',
+    },
+    body: new URLSearchParams({ var: MAIL163_LIST_MESSAGES_XML }).toString(),
+  });
+
+  const rawText = await response.text();
+  const contentType = response.headers.get('content-type') || '';
+  if (!response.ok) {
+    throw new Error(`mail-163 listMessages fetch failed: HTTP ${response.status}`);
+  }
+
+  let parsed = null;
+  try {
+    parsed = parseMail163StructuredResponse(rawText);
+  } catch (err) {
+    const preview = rawText.slice(0, 180).replace(/\s+/g, ' ').trim();
+    throw new Error(
+      `${err?.message || err} (content-type=${contentType || 'unknown'}, preview=${preview})`
+    );
+  }
+
+  const messages = collectMail163ApiMessages(parsed).map(normalizeMail163StructuredMessage);
+
+  if (logProbe && !structuredApiProbeLogged) {
+    structuredApiProbeLogged = true;
+    const first = messages[0] || null;
+    if (first) {
+      log(
+        `Step ${step}: 163 structured inbox probe OK (${messages.length} msgs). First subject="${first.subject.slice(0, 40)}", sent=${first.sentDate || 0}, received=${first.receivedDate || 0}`,
+        'info'
+      );
+    } else {
+      log(`Step ${step}: 163 structured inbox probe OK, but no messages were returned.`, 'info');
+    }
+  }
+
+  return messages;
+}
+
+function buildMail163StructuredMessageMap(messages = []) {
+  const byId = new Map();
+  for (const message of messages) {
+    if (message?.id) {
+      byId.set(message.id, message);
+    }
+  }
+  return byId;
 }
 
 function getMailItemKey(item) {
@@ -183,6 +605,14 @@ async function handlePollEmail(step, payload) {
   );
 
   log(`Step ${step}: Starting email poll on 163 Mail (max ${maxAttempts} attempts)`);
+  let structuredFetchFailed = false;
+  try {
+    await fetchMail163StructuredInbox(step, { logProbe: true });
+  } catch (err) {
+    structuredFetchFailed = true;
+    const message = err?.message || String(err);
+    log(`Step ${step}: 163 structured inbox probe failed: ${message}`, 'warn');
+  }
 
   await ensureInboxView(step);
 
@@ -214,12 +644,24 @@ async function handlePollEmail(step, payload) {
     await refreshInbox();
     await sleep(1000);
 
+    let structuredMessages = [];
+    try {
+      structuredMessages = await fetchMail163StructuredInbox(step);
+    } catch (err) {
+      if (!structuredFetchFailed) {
+        structuredFetchFailed = true;
+        const message = err?.message || String(err);
+        log(`Step ${step}: Structured inbox refresh failed, falling back to DOM time: ${message}`, 'warn');
+      }
+    }
+    const structuredMessageMap = buildMail163StructuredMessageMap(structuredMessages);
     const allItems = findMailItems();
     const useFallback = allowExistingMailFallback && attempt > fallbackAfter;
 
     for (const item of allItems) {
       const id = item.getAttribute('id') || '';
       const itemKey = getMailItemKey(item);
+      const structuredMessage = id ? structuredMessageMap.get(id) : null;
 
       if (!useFallback && itemKey && existingMailKeys.has(itemKey)) continue;
 
@@ -230,20 +672,34 @@ async function handlePollEmail(step, payload) {
       const subject = subjectEl ? subjectEl.textContent : '';
 
       const ariaLabel = (item.getAttribute('aria-label') || '').toLowerCase();
+      const structuredFrom = String(structuredMessage?.from || '').toLowerCase();
+      const structuredSubject = String(structuredMessage?.subject || '');
+      const combinedSubject = `${subject} ${structuredSubject}`.trim();
+      const combinedMetadata = `${ariaLabel} ${structuredFrom}`.trim();
 
-      const senderMatch = senderFilters.some(f => sender.includes(f.toLowerCase()) || ariaLabel.includes(f.toLowerCase()));
-      const subjectMatch = subjectFilters.some(f => subject.toLowerCase().includes(f.toLowerCase()) || ariaLabel.includes(f.toLowerCase()));
+      const senderMatch = senderFilters.some((f) => {
+        const needle = f.toLowerCase();
+        return sender.includes(needle) || ariaLabel.includes(needle) || structuredFrom.includes(needle);
+      });
+      const subjectMatch = subjectFilters.some((f) => {
+        const needle = f.toLowerCase();
+        return combinedSubject.toLowerCase().includes(needle) || combinedMetadata.includes(needle);
+      });
 
       if ((senderMatch || subjectMatch) && filterAfterTimestamp > 0) {
-        const emailTime = parseEmailDate(item);
+        const emailTime = structuredMessage?.sentDate || parseEmailDate(item);
         if (emailTime > 0 && emailTime < filterAfterTimestamp) {
-          log(`Step ${step}: Skipping old email (date: ${new Date(emailTime).toLocaleString()})`, 'info');
+          const timeSource = structuredMessage?.sentDate ? 'sentDate' : 'dom-date';
+          log(
+            `Step ${step}: Skipping old email via ${timeSource} (${new Date(emailTime).toLocaleString()})`,
+            'info'
+          );
           continue;
         }
       }
 
       if (senderMatch || subjectMatch) {
-        const code = extractVerificationCode(subject + ' ' + ariaLabel);
+        const code = extractVerificationCode(`${combinedSubject} ${combinedMetadata}`);
         if (code && excludedCodeSet.has(code)) {
           log(`Step ${step}: Skipping explicitly excluded code: ${code}`, 'info');
           continue;
@@ -252,8 +708,13 @@ async function handlePollEmail(step, payload) {
           seenCodes.add(code);
           await persistSeenCodes();
           const source = useFallback && itemKey && existingMailKeys.has(itemKey) ? 'fallback' : 'new';
-          log(`Step ${step}: Code found: ${code} (${source}, subject: ${subject.slice(0, 40)})`, 'ok');
-          return { ok: true, code, emailTimestamp: Date.now(), mailId: id };
+          log(`Step ${step}: Code found: ${code} (${source}, subject: ${combinedSubject.slice(0, 40)})`, 'ok');
+          return {
+            ok: true,
+            code,
+            emailTimestamp: structuredMessage?.sentDate || structuredMessage?.receivedDate || Date.now(),
+            mailId: id,
+          };
         } else if (code && seenCodes.has(code)) {
           log(`Step ${step}: Skipping already-seen code: ${code}`, 'info');
         }
