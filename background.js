@@ -20,6 +20,8 @@ const VERIFICATION_POLL_SETTINGS = {
   freemailRelaxAfterAttempts: 43,
 };
 const PRE_RESEND_VERIFICATION_POLL_ATTEMPTS = 8; // ~40s before we fall back to clicking "resend email"
+const MAIL163_INBOX_HASH = '#module=mbox.ListModule%7C%7B%22fid%22%3A1%2C%22order%22%3A%22date%22%2C%22desc%22%3Atrue%7D';
+const MAIL163_DEFAULT_INBOX_URL = `https://mail.163.com/js6/main.jsp?df=mail163_letter${MAIL163_INBOX_HASH}`;
 const OPENAI_SITE_DATA_ORIGINS = [
   'https://openai.com',
   'https://chatgpt.com',
@@ -261,6 +263,164 @@ async function getTabId(source) {
   return registry[source]?.tabId || null;
 }
 
+async function waitForTabLoadComplete(tabId, timeoutMs = 30000) {
+  await new Promise((resolve) => {
+    let settled = false;
+    const finish = () => {
+      if (settled) return;
+      settled = true;
+      chrome.tabs.onUpdated.removeListener(listener);
+      clearTimeout(timer);
+      clearInterval(poller);
+      resolve();
+    };
+    const listener = (updatedTabId, info) => {
+      if (updatedTabId === tabId && info.status === 'complete') {
+        finish();
+      }
+    };
+    const poller = setInterval(() => {
+      chrome.tabs.get(tabId)
+        .then((tab) => {
+          if (tab?.status === 'complete') finish();
+        })
+        .catch(() => finish());
+    }, 500);
+    const timer = setTimeout(() => finish(), timeoutMs);
+    chrome.tabs.onUpdated.addListener(listener);
+  });
+}
+
+function getTabCandidateUrl(tab) {
+  return String(tab?.pendingUrl || tab?.url || '').trim();
+}
+
+function buildMail163InboxUrl(baseUrl = MAIL163_DEFAULT_INBOX_URL) {
+  try {
+    const parsed = new URL(baseUrl);
+    const host = /mail\.163\.com$/i.test(parsed.host) ? parsed.host : 'mail.163.com';
+    const search = parsed.search || '?df=mail163_letter';
+    const pathname = parsed.pathname || '/js6/main.jsp';
+    return `${parsed.protocol || 'https:'}//${host}${pathname}${search}${MAIL163_INBOX_HASH}`;
+  } catch {
+    return MAIL163_DEFAULT_INBOX_URL;
+  }
+}
+
+function resolveSourceUrl(source, baseUrl = '') {
+  if (source === 'mail-163') {
+    return buildMail163InboxUrl(baseUrl || MAIL163_DEFAULT_INBOX_URL);
+  }
+  return baseUrl;
+}
+
+function matchesReclaimTarget(tab, options = {}) {
+  const candidateUrl = getTabCandidateUrl(tab);
+  if (!candidateUrl || candidateUrl.startsWith('chrome://')) return false;
+
+  const hosts = Array.isArray(options.reclaimHosts) ? options.reclaimHosts.filter(Boolean) : [];
+  if (hosts.length) {
+    try {
+      const parsed = new URL(candidateUrl);
+      if (hosts.some((host) => parsed.host === host || parsed.host.endsWith(`.${host}`))) return true;
+    } catch {}
+  }
+
+  const patterns = Array.isArray(options.reclaimPatterns) ? options.reclaimPatterns.filter(Boolean) : [];
+  return patterns.some((pattern) => {
+    if (typeof pattern !== 'string' || !pattern) return false;
+    if (pattern.endsWith('/*')) {
+      return candidateUrl.startsWith(pattern.slice(0, -1));
+    }
+    return candidateUrl === pattern;
+  });
+}
+
+async function waitForSourceReady(source, tabId, timeoutMs = 15000) {
+  const startedAt = Date.now();
+  while (Date.now() - startedAt < timeoutMs) {
+    const registry = await getTabRegistry();
+    const entry = registry[source];
+    if (entry?.tabId === tabId && entry.ready) {
+      return true;
+    }
+
+    try {
+      await chrome.tabs.get(tabId);
+    } catch {
+      return false;
+    }
+
+    await new Promise((resolve) => setTimeout(resolve, 250));
+  }
+  return false;
+}
+
+async function ensureSourceReady(source, tabId, options = {}) {
+  const {
+    reloadUrl = '',
+    timeoutMs = 15000,
+  } = options;
+
+  if (await waitForSourceReady(source, tabId, 3000)) {
+    return;
+  }
+
+  const registry = await getTabRegistry();
+  registry[source] = { tabId, ready: false };
+  await setState({ tabRegistry: registry });
+
+  const currentTab = await chrome.tabs.get(tabId).catch(() => null);
+  if (!currentTab) {
+    throw new Error(`${source} tab was closed before content script became ready.`);
+  }
+
+  const targetUrl = resolveSourceUrl(source, getTabCandidateUrl(currentTab) || reloadUrl);
+  if (targetUrl && currentTab.url !== targetUrl) {
+    await chrome.tabs.update(tabId, { url: targetUrl, active: true });
+    console.log(LOG_PREFIX, `Reloading ${source} tab ${tabId} by navigating back to target URL`);
+  } else {
+    await chrome.tabs.update(tabId, { active: true });
+    await chrome.tabs.reload(tabId);
+    console.log(LOG_PREFIX, `Reloading ${source} tab ${tabId} to recover missing content-script ready signal`);
+  }
+
+  await waitForTabLoadComplete(tabId);
+
+  if (await waitForSourceReady(source, tabId, timeoutMs)) {
+    return;
+  }
+
+  throw new Error(`Content script on ${source} did not become ready in ${Math.round(timeoutMs / 1000)}s.`);
+}
+
+async function reclaimExistingTab(source, url, options = {}) {
+  const patterns = Array.isArray(options.reclaimPatterns) ? options.reclaimPatterns.filter(Boolean) : [];
+  const hosts = Array.isArray(options.reclaimHosts) ? options.reclaimHosts.filter(Boolean) : [];
+  if (!patterns.length && !hosts.length) return null;
+
+  const matches = await chrome.tabs.query({});
+  const tab = matches.find((item) => item.id && matchesReclaimTarget(item, options));
+  if (!tab?.id) return null;
+  const targetUrl = resolveSourceUrl(source, getTabCandidateUrl(tab) || url);
+
+  const registry = await getTabRegistry();
+  registry[source] = { tabId: tab.id, ready: false };
+  await setState({ tabRegistry: registry });
+
+  if (tab.url === targetUrl) {
+    await chrome.tabs.update(tab.id, { active: true });
+    await chrome.tabs.reload(tab.id);
+    console.log(LOG_PREFIX, `Reclaimed existing tab ${source} (${tab.id}) and reloaded same URL`);
+  } else {
+    await chrome.tabs.update(tab.id, { url: targetUrl, active: true });
+    console.log(LOG_PREFIX, `Reclaimed existing tab ${source} (${tab.id}), navigated to ${targetUrl.slice(0, 60)}`);
+  }
+
+  await waitForTabLoadComplete(tab.id);
+  return tab.id;
+}
+
 // ============================================================
 // Command Queue (for content scripts not yet ready)
 // ============================================================
@@ -320,18 +480,7 @@ async function reuseOrCreateTab(source, url, options = {}) {
         if (registry[source]) registry[source].ready = false;
         await setState({ tabRegistry: registry });
         await chrome.tabs.reload(tabId);
-
-        await new Promise((resolve) => {
-          const timer = setTimeout(() => { chrome.tabs.onUpdated.removeListener(listener); resolve(); }, 30000);
-          const listener = (tid, info) => {
-            if (tid === tabId && info.status === 'complete') {
-              chrome.tabs.onUpdated.removeListener(listener);
-              clearTimeout(timer);
-              resolve();
-            }
-          };
-          chrome.tabs.onUpdated.addListener(listener);
-        });
+        await waitForTabLoadComplete(tabId);
       }
 
       // For dynamically injected pages like the VPS panel, re-inject immediately.
@@ -364,19 +513,7 @@ async function reuseOrCreateTab(source, url, options = {}) {
     // Navigate existing tab to new URL
     await chrome.tabs.update(tabId, { url, active: true });
     console.log(LOG_PREFIX, `Reused tab ${source} (${tabId}), navigated to ${url.slice(0, 60)}`);
-
-    // Wait for page load complete (with 30s timeout)
-    await new Promise((resolve) => {
-      const timer = setTimeout(() => { chrome.tabs.onUpdated.removeListener(listener); resolve(); }, 30000);
-      const listener = (tid, info) => {
-        if (tid === tabId && info.status === 'complete') {
-          chrome.tabs.onUpdated.removeListener(listener);
-          clearTimeout(timer);
-          resolve();
-        }
-      };
-      chrome.tabs.onUpdated.addListener(listener);
-    });
+    await waitForTabLoadComplete(tabId);
 
     // If dynamic injection needed (VPS panel), re-inject after navigation
     if (options.inject) {
@@ -408,17 +545,7 @@ async function reuseOrCreateTab(source, url, options = {}) {
 
   // If dynamic injection needed (VPS panel), inject scripts after load
   if (options.inject) {
-    await new Promise((resolve) => {
-      const timer = setTimeout(() => { chrome.tabs.onUpdated.removeListener(listener); resolve(); }, 30000);
-      const listener = (tabId, info) => {
-        if (tabId === tab.id && info.status === 'complete') {
-          chrome.tabs.onUpdated.removeListener(listener);
-          clearTimeout(timer);
-          resolve();
-        }
-      };
-      chrome.tabs.onUpdated.addListener(listener);
-    });
+    await waitForTabLoadComplete(tab.id);
     if (options.injectSource) {
       await chrome.scripting.executeScript({
         target: { tabId: tab.id },
@@ -1683,7 +1810,15 @@ async function executeStep3(state) {
 function getMailConfig(state) {
   const provider = state.mailProvider || 'qq';
   if (provider === '163') {
-    return { source: 'mail-163', url: 'https://mail.163.com/js6/main.jsp?df=mail163_letter#module=mbox.ListModule%7C%7B%22fid%22%3A1%2C%22order%22%3A%22date%22%2C%22desc%22%3Atrue%7D', label: '163 Mail' };
+    return {
+      source: 'mail-163',
+      url: MAIL163_DEFAULT_INBOX_URL,
+      label: '163 Mail',
+      reclaimPatterns: ['https://mail.163.com/*'],
+      navigateOnReuse: true,
+      reclaimHosts: ['mail.163.com'],
+      waitForReady: true,
+    };
   }
   if (provider === 'freemail') {
     return { source: 'freemail-api', label: 'Freemail API', apiDriven: true };
@@ -1736,25 +1871,38 @@ async function ensureMailChannelReady(mail, step, phaseLabel = '') {
   const phaseSuffix = phaseLabel ? ` (${phaseLabel})` : '';
   await addLog(`Step ${step}: Opening ${mail.label}${phaseSuffix}...`);
 
+  let tabId = null;
+
   // For mail tabs, only create if not alive; reusing avoids losing the current login session.
   const alive = await isTabAlive(mail.source);
   if (alive) {
     if (mail.navigateOnReuse) {
-      await reuseOrCreateTab(mail.source, mail.url, {
+      const currentTab = await chrome.tabs.get(await getTabId(mail.source)).catch(() => null);
+      const targetUrl = resolveSourceUrl(mail.source, getTabCandidateUrl(currentTab) || mail.url);
+      tabId = await reuseOrCreateTab(mail.source, targetUrl, {
         inject: mail.inject,
         injectSource: mail.injectSource,
       });
     } else {
-      const tabId = await getTabId(mail.source);
+      tabId = await getTabId(mail.source);
       await chrome.tabs.update(tabId, { active: true });
     }
-    return;
+  } else {
+    const reclaimedTabId = await reclaimExistingTab(mail.source, mail.url, mail);
+    if (reclaimedTabId) {
+      tabId = reclaimedTabId;
+      await addLog(`Step ${step}: Reused existing ${mail.label} tab (${reclaimedTabId})`, 'info');
+    } else {
+      tabId = await reuseOrCreateTab(mail.source, resolveSourceUrl(mail.source, mail.url), {
+        inject: mail.inject,
+        injectSource: mail.injectSource,
+      });
+    }
   }
 
-  await reuseOrCreateTab(mail.source, mail.url, {
-    inject: mail.inject,
-    injectSource: mail.injectSource,
-  });
+  if (mail.waitForReady && tabId) {
+    await ensureSourceReady(mail.source, tabId, { reloadUrl: mail.url, timeoutMs: 20000 });
+  }
 }
 
 async function pollVerificationCode(step, state, options = {}) {
@@ -1797,6 +1945,7 @@ async function pollVerificationCode(step, state, options = {}) {
       maxAttempts,
       intervalMs: VERIFICATION_POLL_SETTINGS.intervalMs,
       fallbackAfterAttempts: VERIFICATION_POLL_SETTINGS.fallbackAfterAttempts,
+      excludeCodes,
       disableFallback,
       suppressStepError,
     },

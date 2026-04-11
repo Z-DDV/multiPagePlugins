@@ -59,12 +59,16 @@ function getCurrentMailIds() {
 async function handlePollEmail(step, payload) {
   const {
     disableFallback = false,
+    excludeCodes = [],
     senderFilters,
     subjectFilters,
     maxAttempts,
     intervalMs,
     fallbackAfterAttempts,
   } = payload;
+  const excludedCodeSet = new Set(
+    (excludeCodes || []).map((item) => String(item || '').trim()).filter(Boolean)
+  );
 
   log(`Step ${step}: Starting email poll (max ${maxAttempts} attempts, every ${intervalMs / 1000}s)`);
 
@@ -117,6 +121,10 @@ async function handlePollEmail(step, payload) {
       if (senderMatch || subjectMatch) {
         const code = extractVerificationCode(subject + ' ' + digest);
         if (code) {
+          if (excludedCodeSet.has(code)) {
+            log(`Step ${step}: Skipping explicitly excluded code: ${code}`, 'info');
+            continue;
+          }
           const source = useFallback && existingMailIds.has(mailId) ? 'fallback-first-match' : 'new';
           log(`Step ${step}: Code found: ${code} (${source}, subject: ${subject.slice(0, 40)})`, 'ok');
           return { ok: true, code, emailTimestamp: Date.now(), mailId };

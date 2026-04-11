@@ -9,6 +9,10 @@
 
 const MAIL163_PREFIX = '[MultiPage:mail-163]';
 const isTopFrame = window === window.top;
+const MAIL163_INBOX_HASH = 'module=mbox.ListModule%7C%7B%22fid%22%3A1%2C%22order%22%3A%22date%22%2C%22desc%22%3Atrue%7D';
+const MAIL163_INBOX_LABEL = '\u6536\u4ef6\u7bb1';
+const MAIL163_REFRESH_LABEL = '\u5237\u65b0';
+const MAIL163_RECEIVE_LABEL = '\u6536\u4fe1';
 
 console.log(MAIL163_PREFIX, 'Content script loaded on', location.href, 'frame:', isTopFrame ? 'top' : 'child');
 
@@ -84,13 +88,79 @@ function findMailItems() {
   return document.querySelectorAll('div[sign="letter"]');
 }
 
-function getCurrentMailIds() {
-  const ids = new Set();
+function getMailItemKey(item) {
+  if (!item) return '';
+
+  const id = String(item.getAttribute('id') || '').trim();
+  if (id) return `id:${id}`;
+
+  const sender = normalizeMail163Text(item.querySelector('.nui-user')?.textContent || '');
+  const subject = normalizeMail163Text(item.querySelector('span.da0')?.textContent || '');
+  const aria = normalizeMail163Text(item.getAttribute('aria-label') || '');
+
+  if (aria) return `aria:${aria}`;
+  if (sender || subject) return `text:${sender}|${subject}`;
+  return '';
+}
+
+function getCurrentMailKeys() {
+  const keys = new Set();
   findMailItems().forEach(item => {
-    const id = item.getAttribute('id') || '';
-    if (id) ids.add(id);
+    const key = getMailItemKey(item);
+    if (key) keys.add(key);
   });
-  return ids;
+  return keys;
+}
+
+function normalizeMail163Text(value) {
+  return String(value || '').replace(/\s+/g, '').trim();
+}
+
+function isInboxModuleActive() {
+  return location.hash.includes('mbox.ListModule');
+}
+
+function findInboxLink() {
+  const direct = document.querySelector(`[title="${MAIL163_INBOX_LABEL}"], [title*="${MAIL163_INBOX_LABEL}"]`);
+  if (direct) return direct;
+
+  const candidates = document.querySelectorAll('.nui-tree-item-text, .nui-tree-item, a, span, div[role="treeitem"]');
+  for (const candidate of candidates) {
+    const label = normalizeMail163Text(`${candidate.textContent || ''} ${candidate.getAttribute?.('title') || ''}`);
+    if (label.includes(MAIL163_INBOX_LABEL)) {
+      return candidate;
+    }
+  }
+  return null;
+}
+
+async function waitForInboxLink(timeoutMs = 12000) {
+  const startedAt = Date.now();
+  while (Date.now() - startedAt < timeoutMs) {
+    throwIfStopped();
+    const inboxLink = findInboxLink();
+    if (inboxLink) return inboxLink;
+    await sleep(200);
+  }
+  return null;
+}
+
+async function ensureInboxView(step) {
+  if (!isInboxModuleActive()) {
+    log(`Step ${step}: Current page is not inbox, switching 163 module to inbox...`);
+    location.hash = MAIL163_INBOX_HASH;
+    await sleep(1500);
+  }
+
+  const inboxLink = await waitForInboxLink().catch(() => null);
+  if (!inboxLink) {
+    log(`Step ${step}: Inbox link not found after switching module`, 'warn');
+    return;
+  }
+
+  simulateClick(inboxLink);
+  log(`Step ${step}: Clicked inbox`);
+  await sleep(1000);
 }
 
 // ============================================================
@@ -100,6 +170,7 @@ function getCurrentMailIds() {
 async function handlePollEmail(step, payload) {
   const {
     disableFallback = false,
+    excludeCodes = [],
     senderFilters,
     subjectFilters,
     maxAttempts,
@@ -107,31 +178,26 @@ async function handlePollEmail(step, payload) {
     filterAfterTimestamp = 0,
     fallbackAfterAttempts,
   } = payload;
+  const excludedCodeSet = new Set(
+    (excludeCodes || []).map((item) => String(item || '').trim()).filter(Boolean)
+  );
 
   log(`Step ${step}: Starting email poll on 163 Mail (max ${maxAttempts} attempts)`);
 
-  // Click inbox in sidebar to ensure we're in inbox view
-  log(`Step ${step}: Waiting for sidebar...`);
-  try {
-    const inboxLink = await waitForElement('.nui-tree-item-text[title="收件箱"]', 5000);
-    inboxLink.click();
-    log(`Step ${step}: Clicked inbox`);
-  } catch {
-    log(`Step ${step}: Inbox link not found, proceeding...`, 'warn');
-  }
+  await ensureInboxView(step);
 
   // Wait for mail list container to appear (page loaded check, inbox can be empty)
   log(`Step ${step}: Waiting for mail list...`);
   try {
-    await waitForElement('.nui-tree-item-text[title="收件箱"], .mail-list, div[sign="letter"]', 10000);
+    await waitForElement('.mail-list, div[sign="letter"], .nui-tree, .nui-main', 12000);
     log(`Step ${step}: Mail page loaded`);
   } catch {
     log(`Step ${step}: Mail page may not be fully loaded, proceeding to poll anyway...`, 'warn');
   }
 
   // Snapshot existing mail IDs (may be empty if inbox is empty)
-  const existingMailIds = getCurrentMailIds();
-  log(`Step ${step}: Snapshotted ${existingMailIds.size} existing emails`);
+  const existingMailKeys = getCurrentMailKeys();
+  log(`Step ${step}: Snapshotted ${existingMailKeys.size} existing emails`);
 
   const fallbackEnabled = !disableFallback && maxAttempts > 1;
   const fallbackAfter = fallbackEnabled
@@ -140,6 +206,7 @@ async function handlePollEmail(step, payload) {
       Math.max(1, Number.isFinite(fallbackAfterAttempts) ? fallbackAfterAttempts : Math.ceil(maxAttempts * 0.8))
     )
     : Number.POSITIVE_INFINITY;
+  const allowExistingMailFallback = fallbackEnabled && !filterAfterTimestamp;
 
   for (let attempt = 1; attempt <= maxAttempts; attempt++) {
     log(`Polling 163 Mail... attempt ${attempt}/${maxAttempts}`);
@@ -148,12 +215,13 @@ async function handlePollEmail(step, payload) {
     await sleep(1000);
 
     const allItems = findMailItems();
-    const useFallback = fallbackEnabled && attempt > fallbackAfter;
+    const useFallback = allowExistingMailFallback && attempt > fallbackAfter;
 
     for (const item of allItems) {
       const id = item.getAttribute('id') || '';
+      const itemKey = getMailItemKey(item);
 
-      if (!useFallback && existingMailIds.has(id)) continue;
+      if (!useFallback && itemKey && existingMailKeys.has(itemKey)) continue;
 
       const senderEl = item.querySelector('.nui-user');
       const sender = senderEl ? senderEl.textContent.toLowerCase() : '';
@@ -168,7 +236,7 @@ async function handlePollEmail(step, payload) {
 
       if ((senderMatch || subjectMatch) && filterAfterTimestamp > 0) {
         const emailTime = parseEmailDate(item);
-        if (emailTime > 0 && emailTime < filterAfterTimestamp - 60000) {
+        if (emailTime > 0 && emailTime < filterAfterTimestamp) {
           log(`Step ${step}: Skipping old email (date: ${new Date(emailTime).toLocaleString()})`, 'info');
           continue;
         }
@@ -176,17 +244,15 @@ async function handlePollEmail(step, payload) {
 
       if (senderMatch || subjectMatch) {
         const code = extractVerificationCode(subject + ' ' + ariaLabel);
+        if (code && excludedCodeSet.has(code)) {
+          log(`Step ${step}: Skipping explicitly excluded code: ${code}`, 'info');
+          continue;
+        }
         if (code && !seenCodes.has(code)) {
           seenCodes.add(code);
-          persistSeenCodes();
-          const source = useFallback && existingMailIds.has(id) ? 'fallback' : 'new';
+          await persistSeenCodes();
+          const source = useFallback && itemKey && existingMailKeys.has(itemKey) ? 'fallback' : 'new';
           log(`Step ${step}: Code found: ${code} (${source}, subject: ${subject.slice(0, 40)})`, 'ok');
-
-          // Delete this email via right-click menu, WAIT for it to finish before returning
-          await deleteEmail(item, step);
-          // Extra wait to ensure deletion is processed
-          await sleep(1000);
-
           return { ok: true, code, emailTimestamp: Date.now(), mailId: id };
         } else if (code && seenCodes.has(code)) {
           log(`Step ${step}: Skipping already-seen code: ${code}`, 'info');
@@ -194,7 +260,7 @@ async function handlePollEmail(step, payload) {
       }
     }
 
-    if (fallbackEnabled && attempt === fallbackAfter + 1) {
+    if (allowExistingMailFallback && attempt === fallbackAfter + 1) {
       log(`Step ${step}: No new emails after ${fallbackAfter} attempts, falling back to first match`, 'warn');
     }
 
@@ -210,83 +276,27 @@ async function handlePollEmail(step, payload) {
 }
 
 // ============================================================
-// Delete Email via Right-Click Menu
-// ============================================================
-
-async function deleteEmail(item, step) {
-  try {
-    log(`Step ${step}: Deleting email...`);
-
-    // Strategy 1: Click the trash icon inside the mail item
-    // Each mail item has: <b class="nui-ico nui-ico-delete" title="删除邮件" sign="trash">
-    // These icons appear on hover, so we trigger mouseover first
-    item.dispatchEvent(new MouseEvent('mouseover', { bubbles: true }));
-    item.dispatchEvent(new MouseEvent('mouseenter', { bubbles: true }));
-    await sleep(300);
-
-    const trashIcon = item.querySelector('[sign="trash"], .nui-ico-delete, [title="删除邮件"]');
-    if (trashIcon) {
-      trashIcon.click();
-      log(`Step ${step}: Clicked trash icon`, 'ok');
-      await sleep(1500);
-
-      // Check if item disappeared (confirm deletion)
-      const stillExists = document.getElementById(item.id);
-      if (!stillExists || stillExists.style.display === 'none') {
-        log(`Step ${step}: Email deleted successfully`);
-      } else {
-        log(`Step ${step}: Email may not have been deleted, item still visible`, 'warn');
-      }
-      return;
-    }
-
-    // Strategy 2: Select checkbox then click toolbar delete button
-    log(`Step ${step}: Trash icon not found, trying checkbox + toolbar delete...`);
-    const checkbox = item.querySelector('[sign="checkbox"], .nui-chk');
-    if (checkbox) {
-      checkbox.click();
-      await sleep(300);
-
-      // Click toolbar delete button
-      const toolbarBtns = document.querySelectorAll('.nui-btn .nui-btn-text');
-      for (const btn of toolbarBtns) {
-        if (btn.textContent.replace(/\s/g, '').includes('删除')) {
-          btn.closest('.nui-btn').click();
-          log(`Step ${step}: Clicked toolbar delete`, 'ok');
-          await sleep(1500);
-          return;
-        }
-      }
-    }
-
-    log(`Step ${step}: Could not delete email (no delete button found)`, 'warn');
-  } catch (err) {
-    log(`Step ${step}: Failed to delete email: ${err.message}`, 'warn');
-  }
-}
-
-// ============================================================
 // Inbox Refresh
 // ============================================================
 
 async function refreshInbox() {
-  // Try toolbar "刷 新" button
-  const toolbarBtns = document.querySelectorAll('.nui-btn .nui-btn-text');
+  // Try toolbar refresh button
+  const toolbarBtns = document.querySelectorAll('.nui-btn .nui-btn-text, .nui-btn, button');
   for (const btn of toolbarBtns) {
-    if (btn.textContent.replace(/\s/g, '') === '刷新') {
-      btn.closest('.nui-btn').click();
-      console.log(MAIL163_PREFIX, 'Clicked "刷新" button');
+    if (normalizeMail163Text(btn.textContent) === MAIL163_REFRESH_LABEL) {
+      simulateClick(btn.closest('.nui-btn') || btn);
+      console.log(MAIL163_PREFIX, 'Clicked refresh button');
       await sleep(800);
       return;
     }
   }
 
-  // Fallback: click sidebar "收 信"
+  // Fallback: click mailbox entry
   const shouXinBtns = document.querySelectorAll('.ra0');
   for (const btn of shouXinBtns) {
-    if (btn.textContent.replace(/\s/g, '').includes('收信')) {
-      btn.click();
-      console.log(MAIL163_PREFIX, 'Clicked "收信" button');
+    if (normalizeMail163Text(btn.textContent).includes(MAIL163_RECEIVE_LABEL)) {
+      simulateClick(btn);
+      console.log(MAIL163_PREFIX, 'Clicked mailbox entry');
       await sleep(800);
       return;
     }
