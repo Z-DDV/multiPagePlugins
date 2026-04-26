@@ -38,7 +38,7 @@ const inputFreemailJwtToken = document.getElementById('input-freemail-jwt-token'
 const rowFreemailDomain = document.getElementById('row-freemail-domain');
 const inputFreemailDomain = document.getElementById('input-freemail-domain');
 const inputRunCount = document.getElementById('input-run-count');
-const DEFAULT_VPS_URL = 'https://ddvcode.zeabur.app/manage/oauth';
+const DEFAULT_VPS_URL = 'https://ddv.667410.xyz/manage/auth-files';
 const DEFAULT_VPS_TYPE = 'codeProxy';
 const DEFAULT_MAIL_PROVIDER = 'qq';
 

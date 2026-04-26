@@ -89,6 +89,13 @@ function normalizeText(text) {
   return String(text || '').replace(/\s+/g, ' ').trim();
 }
 
+function isElementVisible(el) {
+  if (!el) return false;
+  const rect = el.getBoundingClientRect();
+  const style = getComputedStyle(el);
+  return rect.width > 0 && rect.height > 0 && style.display !== 'none' && style.visibility !== 'hidden';
+}
+
 function isOAuthCallbackTimeoutText(text) {
   return /认证失败[:：]?\s*Timeout waiting for OAuth callback|Timeout waiting for OAuth callback/i.test(String(text || ''));
 }
@@ -97,7 +104,12 @@ function findButtonByText(root, pattern) {
   if (!root) return null;
   const buttons = root.querySelectorAll('button');
   for (const button of buttons) {
-    if (pattern.test(normalizeText(button.textContent))) {
+    const text = normalizeText([
+      button.textContent,
+      button.getAttribute('aria-label'),
+      button.getAttribute('title'),
+    ].filter(Boolean).join(' '));
+    if (pattern.test(text)) {
       return button;
     }
   }
@@ -117,6 +129,53 @@ function findInputByHint(root, pattern) {
 async function waitForCardByTitle(titlePattern, timeout = 30000) {
   const titleEl = await waitForElementByText('h3, .card-header, [class*="cardTitle"]', titlePattern, timeout);
   return titleEl.closest('section, .card, [class*="card"]') || titleEl.parentElement || document;
+}
+
+function isCodeProxyAuthFilesPage() {
+  return /\/manage\/auth-files(?:\/|$)/.test(location.pathname);
+}
+
+function findCodeProxyOAuthDialog() {
+  const dialogs = Array.from(document.querySelectorAll('[role="dialog"]')).filter(isElementVisible);
+  return dialogs.find(dialog => /增加\s*OAuth\s*登录|Codex\s*OAuth/i.test(normalizeText(dialog.textContent)));
+}
+
+async function ensureCodeProxyCodexTabSelected(dialog) {
+  const codexTab = dialog.querySelector('[role="tab"][data-tab-value="codex"]') ||
+    findButtonByText(dialog, /^Codex\s*OAuth$/i);
+  if (!codexTab) return;
+
+  if (codexTab.getAttribute('aria-selected') !== 'true') {
+    simulateClick(codexTab);
+    log('codeProxy: Selected Codex OAuth tab');
+    await sleep(300);
+  }
+}
+
+async function openCodeProxyOAuthDialog(timeout = 30000) {
+  const startAt = Date.now();
+  let lastClickAt = 0;
+
+  while (Date.now() - startAt < timeout) {
+    throwIfStopped();
+
+    const existingDialog = findCodeProxyOAuthDialog();
+    if (existingDialog) {
+      await ensureCodeProxyCodexTabSelected(existingDialog);
+      return findCodeProxyOAuthDialog() || existingDialog;
+    }
+
+    const addButton = findButtonByText(document, /增加\s*OAuth\s*登录|add\s*oauth\s*login/i);
+    if (addButton && !addButton.disabled && Date.now() - lastClickAt > 1500) {
+      simulateClick(addButton);
+      log('codeProxy: Opened OAuth login dialog');
+      lastClickAt = Date.now();
+    }
+
+    await sleep(200);
+  }
+
+  throw new Error('Could not open codeProxy OAuth login dialog. URL: ' + location.href);
 }
 
 async function waitForAuthUrlInCard(card, timeout = 15000) {
@@ -234,6 +293,10 @@ const cpamcAdapter = {
 
 const codeProxyAdapter = {
   async findCodexCard(timeout = 30000) {
+    if (isCodeProxyAuthFilesPage() || findCodeProxyOAuthDialog() || findButtonByText(document, /增加\s*OAuth\s*登录/i)) {
+      return openCodeProxyOAuthDialog(timeout);
+    }
+
     return waitForCardByTitle(/codex\s*oauth|codex/i, timeout);
   },
   findStartButton(card) {

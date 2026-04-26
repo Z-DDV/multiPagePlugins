@@ -9,6 +9,8 @@ const HUMAN_STEP_DELAY_MIN = 700;
 const HUMAN_STEP_DELAY_MAX = 2200;
 const VPS_TYPE_CPAMC = 'Cli-Proxy-API-Management-Center';
 const VPS_TYPE_CODE_PROXY = 'codeProxy';
+const LEGACY_DEFAULT_VPS_URL = 'https://ddvcode.zeabur.app/manage/oauth';
+const DEFAULT_VPS_URL = 'https://ddv.667410.xyz/manage/auth-files';
 const AUTH_FLOW_MAX_RECOVERY_ATTEMPTS = 5;
 const DUCK_AUTO_FETCH_MAX_ATTEMPTS = 5;
 const DEFAULT_STEP_COMPLETION_TIMEOUT_MS = 120000;
@@ -58,7 +60,7 @@ async function ensureAutomationWindowId() {
   }
   const registry = await getTabRegistry();
   for (const entry of Object.values(registry)) {
-    if (entry.tabId) {
+    if (entry?.tabId) {
       try {
         const tab = await chrome.tabs.get(entry.tabId);
         automationWindowId = tab.windowId;
@@ -91,7 +93,7 @@ const DEFAULT_STATE = {
   flowStartTime: null,
   tabRegistry: {},
   logs: [],
-  vpsUrl: 'https://ddvcode.zeabur.app/manage/oauth',
+  vpsUrl: DEFAULT_VPS_URL,
   vpsType: VPS_TYPE_CODE_PROXY,
   customPassword: '',
   mailProvider: 'qq', // 'qq' or '163'
@@ -107,9 +109,16 @@ function normalizeVpsType(value) {
   return value === VPS_TYPE_CODE_PROXY ? VPS_TYPE_CODE_PROXY : VPS_TYPE_CPAMC;
 }
 
+function normalizeVpsUrl(value) {
+  const url = String(value || '').trim();
+  if (!url || url === LEGACY_DEFAULT_VPS_URL) return DEFAULT_VPS_URL;
+  return url;
+}
+
 async function getState() {
   const state = await chrome.storage.session.get(null);
-  return { ...DEFAULT_STATE, ...state };
+  const merged = { ...DEFAULT_STATE, ...state };
+  return { ...merged, vpsUrl: normalizeVpsUrl(merged.vpsUrl) };
 }
 
 async function initializeSessionStorageAccess() {
@@ -172,7 +181,7 @@ async function resetState() {
     seenInbucketMailIds: prev.seenInbucketMailIds || [],
     accounts: prev.accounts || [],
     tabRegistry: prev.tabRegistry || {},
-    vpsUrl: prev.vpsUrl || DEFAULT_STATE.vpsUrl,
+    vpsUrl: normalizeVpsUrl(prev.vpsUrl),
     vpsType: prev.vpsType ? normalizeVpsType(prev.vpsType) : DEFAULT_STATE.vpsType,
     customPassword: prev.customPassword || '',
     mailProvider: prev.mailProvider || DEFAULT_STATE.mailProvider,
@@ -966,7 +975,7 @@ async function handleMessage(message, sender) {
 
     case 'SAVE_SETTING': {
       const updates = {};
-      if (message.payload.vpsUrl !== undefined) updates.vpsUrl = message.payload.vpsUrl;
+      if (message.payload.vpsUrl !== undefined) updates.vpsUrl = normalizeVpsUrl(message.payload.vpsUrl);
       if (message.payload.vpsType !== undefined) updates.vpsType = normalizeVpsType(message.payload.vpsType);
       if (message.payload.customPassword !== undefined) updates.customPassword = message.payload.customPassword;
       if (message.payload.mailProvider !== undefined) updates.mailProvider = message.payload.mailProvider;
@@ -1364,6 +1373,22 @@ function parseFreemailMessageTimestamp(message) {
       if (!Number.isNaN(numeric) && Number.isFinite(numeric)) {
         return numeric < 1e12 ? numeric * 1000 : numeric;
       }
+
+      const utcLike = candidate.trim().match(
+        /^(\d{4})-(\d{2})-(\d{2})[ T](\d{2}):(\d{2})(?::(\d{2}))?$/
+      );
+      if (utcLike) {
+        const [, year, month, day, hour, minute, second = '0'] = utcLike;
+        return Date.UTC(
+          Number(year),
+          Number(month) - 1,
+          Number(day),
+          Number(hour),
+          Number(minute),
+          Number(second)
+        );
+      }
+
       const parsed = Date.parse(candidate);
       if (!Number.isNaN(parsed)) return parsed;
     }
@@ -1393,9 +1418,13 @@ function extractFreemailVerificationCode(message) {
     message?.preview,
     message?.subject,
     message?.text,
+    message?.text_content,
+    message?.textContent,
     message?.body,
     message?.content,
     message?.html,
+    message?.html_content,
+    message?.htmlContent,
     message?.raw,
   ].map((item) => String(item || '')).join(' ');
 
@@ -1428,6 +1457,10 @@ function normalizeFreemailMessages(payload) {
   ];
   for (const candidate of candidates) {
     if (Array.isArray(candidate)) return candidate;
+    if (candidate && typeof candidate === 'object') {
+      const nested = normalizeFreemailMessages(candidate);
+      if (nested.length) return nested;
+    }
   }
   return [];
 }
@@ -1439,6 +1472,30 @@ function getFreemailMessageId(message) {
     return `hash:${JSON.stringify(message)}`;
   } catch {
     return `hash:${String(message)}`;
+  }
+}
+
+function unwrapFreemailMessageDetail(payload) {
+  if (!payload || typeof payload !== 'object') return payload;
+  const candidates = [payload.data, payload.email, payload.message, payload.item, payload.result];
+  for (const candidate of candidates) {
+    if (candidate && typeof candidate === 'object' && !Array.isArray(candidate)) {
+      return candidate;
+    }
+  }
+  return payload;
+}
+
+async function fetchFreemailMessageDetail(state, message) {
+  const id = getFreemailMessageId(message);
+  if (!id || id.startsWith('hash:')) return null;
+
+  try {
+    const payload = await fetchFreemailJson(state, `/api/email/${encodeURIComponent(id)}`);
+    return unwrapFreemailMessageDetail(payload);
+  } catch (err) {
+    await addLog(`Freemail: failed to load email detail ${id} (${err.message}).`, 'warn');
+    return null;
   }
 }
 
@@ -1492,9 +1549,17 @@ async function fetchFreemailJson(state, path, params = {}, method = 'GET', body 
   return payload;
 }
 
+function parseFreemailDomains(rawValue) {
+  const domains = String(rawValue || '')
+    .split(/[,\n，;；]+/)
+    .map((item) => item.trim().replace(/^@+/, '').toLowerCase())
+    .filter(Boolean);
+  return [...new Set(domains)];
+}
+
 async function resolveFreemailDomainIndex(state) {
-  const preferredDomain = String(state.freemailDomain || '').trim().replace(/^@+/, '').toLowerCase();
-  if (!preferredDomain) return null;
+  const preferredDomains = parseFreemailDomains(state.freemailDomain);
+  if (!preferredDomains.length) return null;
 
   try {
     const domainsPayload = await fetchFreemailJson(state, '/api/domains');
@@ -1515,12 +1580,19 @@ async function resolveFreemailDomainIndex(state) {
       if (domain && !domains.includes(domain)) domains.push(domain);
     }
 
-    const index = domains.findIndex((domain) => domain === preferredDomain);
-    if (index === -1) {
-      await addLog(`Freemail: configured domain "${preferredDomain}" not found in /api/domains. Falling back to default domain.`, 'warn');
+    const matches = preferredDomains
+      .map((domain) => ({ domain, index: domains.findIndex((item) => item === domain) }))
+      .filter((item) => item.index >= 0);
+    if (!matches.length) {
+      await addLog(`Freemail: configured domains not found in /api/domains. Falling back to default domain.`, 'warn');
       return 0;
     }
-    return index;
+
+    const selected = matches[Math.floor(Math.random() * matches.length)];
+    if (matches.length > 1) {
+      await addLog(`Freemail: selected domain ${selected.domain} from ${matches.length} configured domains.`, 'info');
+    }
+    return selected.index;
   } catch (err) {
     await addLog(`Freemail: failed to resolve domain list (${err.message}). Falling back to default domain.`, 'warn');
     return 0;
@@ -1540,11 +1612,11 @@ async function fetchFreemailEmail(state) {
     throw new Error('Freemail API did not return a valid email.');
   }
 
-  const preferredDomain = String(state.freemailDomain || '').trim().replace(/^@+/, '').toLowerCase();
-  if (preferredDomain) {
+  const preferredDomains = parseFreemailDomains(state.freemailDomain);
+  if (preferredDomains.length) {
     const actualDomain = email.split('@')[1]?.trim().toLowerCase() || '';
-    if (actualDomain && actualDomain !== preferredDomain) {
-      await addLog(`Freemail: expected domain ${preferredDomain}, received ${actualDomain}.`, 'warn');
+    if (actualDomain && !preferredDomains.includes(actualDomain)) {
+      await addLog(`Freemail: expected one of configured domains, received ${actualDomain}.`, 'warn');
     }
   }
 
@@ -1568,7 +1640,6 @@ async function pollFreemailVerificationCode(state, options = {}) {
     relaxTimestampAfterAttempts = Math.ceil(maxAttempts / 2),
   } = options;
 
-  const seenMessageIds = new Set();
   const excludedCodeSet = new Set(
     (excludeCodes || []).map((item) => String(item || '').trim()).filter(Boolean)
   );
@@ -1594,6 +1665,8 @@ async function pollFreemailVerificationCode(state, options = {}) {
     }
 
     const relaxedTimestampFilter = attempt > relaxTimestampAfterAttempts;
+    const seenMessageIdsThisAttempt = new Set();
+    const fetchedDetailIdsThisAttempt = new Set();
     for (const message of messages) {
       const emailTimestamp = parseFreemailMessageTimestamp(message);
       if (
@@ -1606,16 +1679,27 @@ async function pollFreemailVerificationCode(state, options = {}) {
       }
 
       const messageId = getFreemailMessageId(message);
-      if (messageId && seenMessageIds.has(messageId)) continue;
-      if (messageId) seenMessageIds.add(messageId);
+      if (messageId && seenMessageIdsThisAttempt.has(messageId)) continue;
+      if (messageId) seenMessageIdsThisAttempt.add(messageId);
 
-      const code = extractFreemailVerificationCode(message);
+      let code = extractFreemailVerificationCode(message);
+      let emailTimestampForResult = emailTimestamp || Date.now();
+
+      if (!code && messageId && !messageId.startsWith('hash:') && !fetchedDetailIdsThisAttempt.has(messageId)) {
+        fetchedDetailIdsThisAttempt.add(messageId);
+        const detail = await fetchFreemailMessageDetail(state, message);
+        if (detail) {
+          code = extractFreemailVerificationCode(detail);
+          emailTimestampForResult = parseFreemailMessageTimestamp(detail) || emailTimestampForResult;
+        }
+      }
+
       if (!code) continue;
       if (excludedCodeSet.has(code)) continue;
 
       return {
         code,
-        emailTimestamp: emailTimestamp || Date.now(),
+        emailTimestamp: emailTimestampForResult,
         mailId: messageId || null,
       };
     }
@@ -1999,9 +2083,8 @@ async function pollVerificationCode(step, state, options = {}) {
   if (mail.error) throw new Error(mail.error);
 
   const pollConfig = getVerificationPollConfig(step);
-  await ensureMailChannelReady(mail, step, phaseLabel);
-
   if (mail.apiDriven) {
+    await addLog(`Step ${step}: Using ${mail.label}${phaseLabel ? ` (${phaseLabel})` : ''}...`, 'info');
     return pollFreemailVerificationCode(state, {
       step,
       filterAfterTimestamp,
@@ -2011,6 +2094,8 @@ async function pollVerificationCode(step, state, options = {}) {
       excludeCodes,
     });
   }
+
+  await ensureMailChannelReady(mail, step, phaseLabel);
 
   const result = await sendToContentScript(mail.source, {
     type: 'POLL_EMAIL',

@@ -51,7 +51,7 @@
 
 ```txt
 Cli-Proxy-API-Management-Center: http(s)://<your-host>/management.html#/oauth
-codeProxy(/manage 构建):         http(s)://<your-host>/manage/oauth
+codeProxy(/manage 构建):         http(s)://<your-host>/manage/auth-files
 ```
 
 Step 1 和 Step 9 都依赖这个地址。
@@ -66,20 +66,22 @@ Step 1 和 Step 9 都依赖这个地址。
 选择规则：
 
 - 地址像 `.../management.html#/oauth`，选 `Cli-Proxy-API-Management-Center`
-- 地址像 `.../manage/oauth`，选 `codeProxy`
+- 地址像 `.../manage/auth-files`，选 `codeProxy`
 
 ### `Mail`
 
-支持三种验证码来源：
+支持四种验证码来源：
 
 - `163 Mail`
 - `QQ Mail`
 - `Inbucket`
+- `Freemail`
 
 说明：
 
 - `QQ` 和 `163` 用于直接轮询网页邮箱
 - `Inbucket` 通过你在侧边栏里配置的 host 访问 `mailbox` 页面：`https://<your-inbucket-host>/m/<mailbox>/`
+- `Freemail` 通过自建 API 生成邮箱并轮询验证码
 
 ### `Mailbox`
 
@@ -113,6 +115,16 @@ https://<your-inbucket-host>/m/<mailbox>/
 - `https://your-inbucket-host`
 
 脚本会自动规范化成 origin 后再拼接 mailbox URL。
+
+### `Freemail Domain`
+
+仅当 `Mail = Freemail` 时显示。可留空使用默认域名，也可填写一个或多个域名；多个域名用英文逗号分隔，例如：
+
+```txt
+mail4.example.com,mail5.example.com,openai.example.com
+```
+
+脚本会从配置且存在于 `/api/domains` 的域名中随机选择一个生成邮箱。
 
 ### `Email`
 
@@ -182,7 +194,7 @@ Step 3 使用的注册邮箱。
 通过 `content/vps-panel.js`：
 
 - 打开 VPS OAuth 面板
-- 等待 `Codex OAuth` 卡片出现
+- 旧版页面等待 `Codex OAuth` 卡片出现；新版 codeProxy 会先打开“增加 OAuth 登录”弹窗
 - 按 `VPSTYPE` 使用对应的 DOM 选择器并点击“登录 / 开始授权”
 - 读取页面里的授权链接
 
