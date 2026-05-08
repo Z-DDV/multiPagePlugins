@@ -87,7 +87,8 @@ const DEFAULT_FREEMAIL_API_URL = 'https://mailfree.zhangbaba520.workers.dev/';
 const DEFAULT_FREEMAIL_DOMAIN = 'mail4.667410.xyz,mail5.667410.xyz,mail6.667410.xyz,mail7.667410.xyz,mail8.667410.xyz,mail9.667410.xyz,mail10.667410.xyz,mail11.667410.xyz,mail12.667410.xyz,baidu.667410.xyz,163.667410.xyz,gmail.667410.xyz,qq.667410.xyz,openai.667410.xyz,runtime.667410.xyz,edu.667410.xyz,google.667410.xyz,apple.667410.xyz,codex.667410.xyz';
 const DEFAULT_SMSBOWER_MAX_PRICE = 0.08;
 const DEFAULT_HERO_MAX_PRICE = 0.08;
-const DEFAULT_FIVESIM_MAX_PRICE = 50;
+const DEFAULT_FIVESIM_COUNTRY = 'vietnam';
+const DEFAULT_FIVESIM_MAX_PRICE = 0.15;
 
 // ============================================================
 // Toast Notifications
@@ -188,7 +189,11 @@ async function restoreState() {
     if (state.heroPollTimeoutSec !== undefined) inputHeroTimeout.value = state.heroPollTimeoutSec;
     if (state.fivesimApiKey) inputFivesimKey.value = state.fivesimApiKey;
     if (state.fivesimService) inputFivesimService.value = state.fivesimService;
-    if (state.fivesimCountry) inputFivesimCountry.value = state.fivesimCountry;
+    if (state.fivesimCountry) {
+      inputFivesimCountry.value = state.fivesimCountry;
+    } else {
+      inputFivesimCountry.value = DEFAULT_FIVESIM_COUNTRY;
+    }
     if (state.fivesimMaxPrice !== undefined) {
       inputFivesimMaxPrice.value = state.fivesimMaxPrice;
     } else {

@@ -130,8 +130,8 @@ const DEFAULT_STATE = {
   heroPollTimeoutSec: 120,
   fivesimApiKey: '',
   fivesimService: 'openai',
-  fivesimCountry: 'any',
-  fivesimMaxPrice: 50,
+  fivesimCountry: 'vietnam',
+  fivesimMaxPrice: 0.15,
   fivesimMaxTries: 3,
   fivesimPollTimeoutSec: 180,
   lastSignupCode: null,
@@ -206,7 +206,7 @@ function applySmsStateDefaults(state) {
     heroPollTimeoutSec: toPositiveInteger(state.heroPollTimeoutSec, 120),
     fivesimApiKey: String(state.fivesimApiKey || '').trim(),
     fivesimService: String(state.fivesimService || 'openai').trim() || 'openai',
-    fivesimCountry: String(state.fivesimCountry || 'any').trim() || 'any',
+    fivesimCountry: String(state.fivesimCountry || DEFAULT_STATE.fivesimCountry).trim() || DEFAULT_STATE.fivesimCountry,
     fivesimMaxPrice: toNonNegativeNumber(state.fivesimMaxPrice, DEFAULT_STATE.fivesimMaxPrice),
     fivesimMaxTries: toPositiveInteger(state.fivesimMaxTries, 3),
     fivesimPollTimeoutSec: toPositiveInteger(state.fivesimPollTimeoutSec, 180),
@@ -331,7 +331,7 @@ async function resetState() {
     heroPollTimeoutSec: toPositiveInteger(prev.heroPollTimeoutSec, 120),
     fivesimApiKey: String(prev.fivesimApiKey || '').trim(),
     fivesimService: String(prev.fivesimService || 'openai').trim() || 'openai',
-    fivesimCountry: String(prev.fivesimCountry || 'any').trim() || 'any',
+    fivesimCountry: String(prev.fivesimCountry || DEFAULT_STATE.fivesimCountry).trim() || DEFAULT_STATE.fivesimCountry,
     fivesimMaxPrice: toNonNegativeNumber(prev.fivesimMaxPrice, DEFAULT_STATE.fivesimMaxPrice),
     fivesimMaxTries: toPositiveInteger(prev.fivesimMaxTries, 3),
     fivesimPollTimeoutSec: toPositiveInteger(prev.fivesimPollTimeoutSec, 180),
@@ -1175,7 +1175,7 @@ async function handleMessage(message, sender) {
       if (message.payload.heroPollTimeoutSec !== undefined) updates.heroPollTimeoutSec = toPositiveInteger(message.payload.heroPollTimeoutSec, 120);
       if (message.payload.fivesimApiKey !== undefined) updates.fivesimApiKey = String(message.payload.fivesimApiKey || '').trim();
       if (message.payload.fivesimService !== undefined) updates.fivesimService = String(message.payload.fivesimService || '').trim() || 'openai';
-      if (message.payload.fivesimCountry !== undefined) updates.fivesimCountry = String(message.payload.fivesimCountry || '').trim() || 'any';
+      if (message.payload.fivesimCountry !== undefined) updates.fivesimCountry = String(message.payload.fivesimCountry || '').trim() || DEFAULT_STATE.fivesimCountry;
       if (message.payload.fivesimMaxPrice !== undefined) updates.fivesimMaxPrice = toNonNegativeNumber(message.payload.fivesimMaxPrice, DEFAULT_STATE.fivesimMaxPrice);
       if (message.payload.fivesimMaxTries !== undefined) updates.fivesimMaxTries = toPositiveInteger(message.payload.fivesimMaxTries, 3);
       if (message.payload.fivesimPollTimeoutSec !== undefined) updates.fivesimPollTimeoutSec = toPositiveInteger(message.payload.fivesimPollTimeoutSec, 180);
@@ -2790,7 +2790,7 @@ async function fiveSimSetStatus(apiKey, action, orderId) {
 }
 
 async function fiveSimGetNumber(state) {
-  const country = String(state.fivesimCountry || 'any').trim() || 'any';
+  const country = String(state.fivesimCountry || DEFAULT_STATE.fivesimCountry).trim() || DEFAULT_STATE.fivesimCountry;
   const service = String(state.fivesimService || 'openai').trim() || 'openai';
   const maxPrice = toNonNegativeNumber(state.fivesimMaxPrice, DEFAULT_STATE.fivesimMaxPrice);
   const params = {};
