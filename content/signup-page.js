@@ -5,7 +5,15 @@ console.log('[MultiPage:signup-page] Content script loaded on', location.href);
 
 // Listen for commands from Background
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
-  if (message.type === 'EXECUTE_STEP' || message.type === 'FILL_CODE' || message.type === 'STEP8_FIND_AND_CLICK' || message.type === 'CLICK_RESEND_EMAIL') {
+  if (
+    message.type === 'EXECUTE_STEP'
+    || message.type === 'FILL_CODE'
+    || message.type === 'STEP8_FIND_AND_CLICK'
+    || message.type === 'CLICK_RESEND_EMAIL'
+    || message.type === 'CHECK_ADD_PHONE_PAGE'
+    || message.type === 'PHONE_SEND_CODE'
+    || message.type === 'PHONE_FILL_CODE'
+  ) {
     resetStopState();
     handleCommand(message).then((result) => {
       sendResponse({ ok: true, ...(result || {}) });
@@ -18,6 +26,14 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
 
       if (message.type === 'STEP8_FIND_AND_CLICK') {
         log(`Step 8: ${err.message}`, 'error');
+        sendResponse({ error: err.message });
+        return;
+      }
+
+      // Some step-5 sub-commands (phone send/fill) are expected to fail transiently
+      // while background retries providers/numbers. Do not emit STEP_ERROR for them,
+      // otherwise step waiter is rejected even if a later retry succeeds.
+      if (message.payload?.suppressStepError) {
         sendResponse({ error: err.message });
         return;
       }
@@ -47,6 +63,12 @@ async function handleCommand(message) {
       return await clickResendEmail(message.step);
     case 'STEP8_FIND_AND_CLICK':
       return await step8_findAndClick();
+    case 'CHECK_ADD_PHONE_PAGE':
+      return { isAddPhonePage: isAddPhonePageReady() };
+    case 'PHONE_SEND_CODE':
+      return await sendPhoneVerificationCode(message.payload);
+    case 'PHONE_FILL_CODE':
+      return await fillPhoneVerificationCode(message.payload);
   }
 }
 
@@ -410,7 +432,332 @@ function getSerializableRect(el) {
 // Step 5: Fill Name & Birthday / Age
 // ============================================================
 
+const ADD_PHONE_PAGE_PATTERN = /add[\s-]*phone|phone\s*number|telephone|手机号|手机号码|添加手机号/i;
+const PHONE_VERIFICATION_PAGE_PATTERN = /phone[\s-]*verification|verify\s*(?:your\s*)?phone|sms\s*code|verification\s*code|验证码|短信验证码/i;
+const STEP5_SUBMIT_ERROR_PATTERN = /unable\s+to\s+create\s+(?:your\s+)?account|couldn'?t\s+create\s+(?:your\s+)?account|something\s+went\s+wrong|invalid\s+(?:birthday|birth|date)|生日|出生日期|请重试/i;
+const PHONE_VERIFICATION_ERROR_PATTERN = /invalid|incorrect|try\s+again|error|failed|验证码|不正确|错误|失败/i;
+const OAUTH_CONSENT_PATTERN = /login\s+to\s+codex|log\s+in\s+to\s+codex|使用\s*chatgpt\s*登录到\s*codex|authorize|授权/i;
+
+function getPageTextSnapshot() {
+  return (document.body?.innerText || document.body?.textContent || '')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+function isAddPhonePageReady() {
+  const path = `${location.pathname || ''} ${location.href || ''}`;
+  if (/\/add-phone(?:[/?#]|$)/i.test(path)) return true;
+
+  const phoneInput = document.querySelector(
+    'input[type="tel"]:not([maxlength="6"]), input[name*="phone" i], input[id*="phone" i], input[autocomplete="tel"]'
+  );
+  if (phoneInput && isElementVisible(phoneInput)) {
+    return true;
+  }
+
+  return ADD_PHONE_PAGE_PATTERN.test(getPageTextSnapshot());
+}
+
+function isPhoneVerificationPageReady() {
+  const path = `${location.pathname || ''} ${location.href || ''}`;
+  if (/\/phone-verification(?:[/?#]|$)/i.test(path)) return true;
+
+  const fields = findPhoneCodeInputs();
+  if (fields.singleInput || fields.splitInputs.length >= 6) {
+    return true;
+  }
+
+  return PHONE_VERIFICATION_PAGE_PATTERN.test(getPageTextSnapshot());
+}
+
+function isOAuthConsentPageReady() {
+  const continueBtn = document.querySelector(
+    'button[type="submit"][data-dd-action-name="Continue"], button[type="submit"]._primary_3rdp0_107'
+  );
+  if (!continueBtn || !isElementVisible(continueBtn)) return false;
+  return OAUTH_CONSENT_PATTERN.test(getPageTextSnapshot());
+}
+
+function getStep5SubmitErrorText() {
+  const selectors = [
+    '.react-aria-FieldError',
+    '[slot="errorMessage"]',
+    '[id$="-error"]',
+    '[id$="-errors"]',
+    '[role="alert"]',
+    '[aria-live="assertive"]',
+    '[aria-live="polite"]',
+    '[class*="error"]',
+  ];
+
+  for (const selector of selectors) {
+    const nodes = document.querySelectorAll(selector);
+    for (const node of nodes) {
+      if (!isElementVisible(node)) continue;
+      const text = (node.textContent || '').replace(/\s+/g, ' ').trim();
+      if (text && STEP5_SUBMIT_ERROR_PATTERN.test(text)) {
+        return text;
+      }
+    }
+  }
+
+  const pageText = getPageTextSnapshot();
+  if (STEP5_SUBMIT_ERROR_PATTERN.test(pageText)) {
+    return pageText.slice(0, 240);
+  }
+
+  return '';
+}
+
+async function waitForStep5SubmitOutcome(timeout = 18000) {
+  const start = Date.now();
+
+  while (Date.now() - start < timeout) {
+    throwIfStopped();
+
+    const errorText = getStep5SubmitErrorText();
+    if (errorText) {
+      return { invalidProfile: true, errorText };
+    }
+
+    if (isAddPhonePageReady()) {
+      return { success: true, addPhonePage: true };
+    }
+
+    if (isOAuthConsentPageReady()) {
+      return { success: true, addPhonePage: false };
+    }
+
+    await sleep(200);
+  }
+
+  const errorText = getStep5SubmitErrorText();
+  if (errorText) {
+    return { invalidProfile: true, errorText };
+  }
+
+  if (isAddPhonePageReady()) {
+    return { success: true, addPhonePage: true };
+  }
+
+  return { success: true, addPhonePage: false, assumed: true };
+}
+
+function getActionText(el) {
+  return (el?.textContent || '').replace(/\s+/g, ' ').trim();
+}
+
+function findActionButton(pattern, { allowDisabled = false } = {}) {
+  const candidates = document.querySelectorAll('button, [role="button"], input[type="submit"]');
+  for (const el of candidates) {
+    if (!isElementVisible(el)) continue;
+    if (!allowDisabled && !isButtonEnabled(el)) continue;
+    if (pattern.test(getActionText(el))) {
+      return el;
+    }
+  }
+  return null;
+}
+
+function findPhoneInputField() {
+  const selectors = [
+    'input[type="tel"]',
+    'input[name*="phone" i]',
+    'input[id*="phone" i]',
+    'input[autocomplete="tel"]',
+  ];
+  for (const selector of selectors) {
+    const input = document.querySelector(selector);
+    if (input && isElementVisible(input)) {
+      return input;
+    }
+  }
+  return null;
+}
+
+function findPhoneCodeInputs() {
+  const single = document.querySelector(
+    'input[name="code"], input[name="otp"], input[inputmode="numeric"][maxlength="6"], input[maxlength="6"]'
+  );
+  if (single && isElementVisible(single)) {
+    return { singleInput: single, splitInputs: [] };
+  }
+
+  const splitInputs = Array.from(document.querySelectorAll('input[maxlength="1"]'))
+    .filter((el) => isElementVisible(el));
+  if (splitInputs.length >= 6) {
+    return { singleInput: null, splitInputs };
+  }
+
+  return { singleInput: null, splitInputs: [] };
+}
+
+function getPhoneVerificationErrorText() {
+  const selectors = [
+    '.react-aria-FieldError',
+    '[slot="errorMessage"]',
+    '[id$="-error"]',
+    '[role="alert"]',
+    '[aria-live="assertive"]',
+    '[aria-live="polite"]',
+    '[class*="error"]',
+  ];
+
+  for (const selector of selectors) {
+    const nodes = document.querySelectorAll(selector);
+    for (const node of nodes) {
+      if (!isElementVisible(node)) continue;
+      const text = (node.textContent || '').replace(/\s+/g, ' ').trim();
+      if (text && PHONE_VERIFICATION_ERROR_PATTERN.test(text)) {
+        return text;
+      }
+    }
+  }
+  return '';
+}
+
+async function waitForPhoneCodeInput(timeout = 20000) {
+  const start = Date.now();
+  while (Date.now() - start < timeout) {
+    throwIfStopped();
+    const fields = findPhoneCodeInputs();
+    if (fields.singleInput || fields.splitInputs.length >= 6) {
+      return true;
+    }
+    const err = getPhoneVerificationErrorText();
+    if (err) {
+      throw new Error(err);
+    }
+    await sleep(200);
+  }
+  return false;
+}
+
+async function waitForPhoneVerificationOutcome(timeout = 30000) {
+  const start = Date.now();
+  while (Date.now() - start < timeout) {
+    throwIfStopped();
+
+    if (!isAddPhonePageReady() && !isPhoneVerificationPageReady()) {
+      return { verified: true };
+    }
+
+    const errorText = getPhoneVerificationErrorText();
+    if (errorText) {
+      return { verified: false, invalidCode: true, error: errorText };
+    }
+
+    await sleep(250);
+  }
+
+  if (!isAddPhonePageReady() && !isPhoneVerificationPageReady()) {
+    return { verified: true };
+  }
+
+  return { verified: false, error: 'Phone verification did not finish in time.' };
+}
+
+async function sendPhoneVerificationCode(payload = {}) {
+  const phoneNumber = String(payload.phoneNumber || '').trim();
+  if (!phoneNumber) {
+    throw new Error('No phone number provided.');
+  }
+  if (!isAddPhonePageReady()) {
+    throw new Error('Current page is not add-phone.');
+  }
+
+  let phoneInput = findPhoneInputField();
+  if (!phoneInput) {
+    phoneInput = await waitForElement(
+      'input[type="tel"], input[name*="phone" i], input[id*="phone" i], input[autocomplete="tel"]',
+      12000
+    );
+  }
+
+  await humanPause(350, 900);
+  fillInput(phoneInput, phoneNumber);
+  log(`Step 5: Filled phone number ${phoneNumber}`);
+
+  await sleep(300);
+
+  let sendBtn = findActionButton(/send|continue|next|code|验证码|短信|发送|继续/i);
+  if (!sendBtn) {
+    sendBtn = document.querySelector('button[type="submit"], input[type="submit"]');
+  }
+  if (!sendBtn || !isElementVisible(sendBtn)) {
+    throw new Error('Could not find send-code button on add-phone page.');
+  }
+
+  await humanPause(300, 800);
+  simulateClick(sendBtn);
+  log('Step 5: Triggered phone SMS send');
+
+  const codeInputReady = await waitForPhoneCodeInput(20000);
+  if (!codeInputReady) {
+    throw new Error('Phone OTP input did not appear after sending SMS code.');
+  }
+  return { codeInputReady, isAddPhonePage: isAddPhonePageReady() };
+}
+
+async function fillPhoneVerificationCode(payload = {}) {
+  const rawCode = String(payload.code || '').trim();
+  const codeMatch = rawCode.match(/\d{6}/);
+  if (!codeMatch) {
+    throw new Error('Phone verification code is empty or invalid.');
+  }
+  const code = codeMatch[0];
+
+  if (!isAddPhonePageReady() && !isPhoneVerificationPageReady()) {
+    return {
+      verified: false,
+      codeFilled: false,
+      error: 'Not on phone-verification page when trying to fill OTP.',
+    };
+  }
+
+  const fields = findPhoneCodeInputs();
+  if (!fields.singleInput && fields.splitInputs.length < 6) {
+    await waitForPhoneCodeInput(12000);
+  }
+
+  const resolved = findPhoneCodeInputs();
+  if (resolved.singleInput) {
+    fillInput(resolved.singleInput, code);
+  } else if (resolved.splitInputs.length >= 6) {
+    for (let i = 0; i < 6; i++) {
+      fillInput(resolved.splitInputs[i], code[i]);
+      await sleep(80);
+    }
+  } else {
+    throw new Error('Could not find phone OTP input.');
+  }
+  log(`Step 5: Filled phone OTP code ${code}`);
+
+  await sleep(300);
+  const verifyBtn = findActionButton(/verify|confirm|submit|continue|完成|确认|验证|继续/i)
+    || document.querySelector('button[type="submit"], input[type="submit"]');
+
+  if (verifyBtn && isElementVisible(verifyBtn)) {
+    await humanPause(300, 800);
+    simulateClick(verifyBtn);
+    log('Step 5: Submitted phone OTP code');
+  }
+
+  const outcome = await waitForPhoneVerificationOutcome(32000);
+  return {
+    ...outcome,
+    codeFilled: true,
+  };
+}
+
 async function step5_fillNameBirthday(payload) {
+  const skipIfNoProfile = Boolean(payload?.skipIfNoProfile);
+  if (isAddPhonePageReady()) {
+    log('Step 5: add-phone page detected, deferring profile form fill.', 'warn');
+    reportComplete(5, { addPhonePage: true, profileSkipped: true });
+    return { addPhonePage: true, profileSkipped: true };
+  }
+
   const { firstName, lastName, age, year, month, day } = payload;
   if (!firstName || !lastName) throw new Error('No name data provided.');
 
@@ -436,6 +783,11 @@ async function step5_fillNameBirthday(payload) {
       10000
     );
   } catch {
+    if (skipIfNoProfile) {
+      log('Step 5: Profile form not found after phone verification, skip deferred profile fill.', 'warn');
+      reportComplete(5, { addPhonePage: false, profileSkipped: true });
+      return { addPhonePage: false, profileSkipped: true };
+    }
     throw new Error('Could not find name input. URL: ' + location.href);
   }
   await humanPause(500, 1300);
@@ -537,12 +889,26 @@ async function step5_fillNameBirthday(payload) {
   const completeBtn = document.querySelector('button[type="submit"]')
     || await waitForElementByText('button', /完成|create|continue|finish|done|agree/i, 5000).catch(() => null);
 
-  // Report complete BEFORE submit (page navigates to add-phone after this)
-  reportComplete(5);
-
-  if (completeBtn) {
-    await humanPause(500, 1300);
-    simulateClick(completeBtn);
-    log('Step 5: Clicked "完成帐户创建"');
+  if (!completeBtn) {
+    throw new Error('Could not find account creation submit button. URL: ' + location.href);
   }
+
+  await humanPause(500, 1300);
+  simulateClick(completeBtn);
+  log('Step 5: Clicked "完成帐户创建"');
+
+  const outcome = await waitForStep5SubmitOutcome();
+  if (outcome.invalidProfile) {
+    throw new Error(outcome.errorText || 'Profile submission rejected.');
+  }
+
+  const addPhonePage = Boolean(outcome.addPhonePage);
+  if (addPhonePage) {
+    log('Step 5: Redirected to add-phone page', 'warn');
+  } else {
+    log('Step 5: Account profile accepted', 'ok');
+  }
+
+  reportComplete(5, { addPhonePage });
+  return { addPhonePage };
 }

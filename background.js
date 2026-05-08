@@ -15,6 +15,14 @@ const AUTH_FLOW_MAX_RECOVERY_ATTEMPTS = 5;
 const DUCK_AUTO_FETCH_MAX_ATTEMPTS = 5;
 const DEFAULT_STEP_COMPLETION_TIMEOUT_MS = 120000;
 const VERIFICATION_STEP_COMPLETION_TIMEOUT_MS = 360000;
+const SMS_PROVIDER_NONE = 'none';
+const SMS_PROVIDER_AUTO = 'auto';
+const SMS_PROVIDER_SMSBOWER = 'smsbower';
+const SMS_PROVIDER_HERO = 'hero';
+const SMS_PROVIDER_FIVESIM = 'fivesim';
+const SMS_PROVIDER_FALLBACK_ORDER = [SMS_PROVIDER_SMSBOWER, SMS_PROVIDER_HERO, SMS_PROVIDER_FIVESIM];
+const SMSBOWER_DEFAULT_BASE_URL = 'https://smsbower.page/stubs/handler_api.php';
+const HERO_DEFAULT_BASE_URL = 'https://hero-sms.com/stubs/handler_api.php';
 const VERIFICATION_POLL_SETTINGS = {
   maxAttempts: 45,
   intervalMs: 5000,
@@ -44,10 +52,13 @@ const OPENAI_SITE_DATA_TYPES = {
   serviceWorkers: true,
   webSQL: true,
 };
+const LOCAL_LOG_SINK_ENDPOINT = 'http://127.0.0.1:17373/log';
+const LOCAL_LOG_SINK_FAILURE_BACKOFF_MS = 30000;
 
 initializeSessionStorageAccess();
 
 let automationWindowId = null;
+let localLogSinkDisabledUntil = 0;
 
 async function ensureAutomationWindowId() {
   if (automationWindowId != null) {
@@ -96,12 +107,33 @@ const DEFAULT_STATE = {
   vpsUrl: DEFAULT_VPS_URL,
   vpsType: VPS_TYPE_CODE_PROXY,
   customPassword: '',
-  mailProvider: 'qq', // 'qq' or '163'
+  mailProvider: 'freemail',
   inbucketHost: '',
   inbucketMailbox: '',
-  freemailApiUrl: '',
+  freemailApiUrl: 'https://mailfree.zhangbaba520.workers.dev/',
   freemailJwtToken: '',
-  freemailDomain: '',
+  freemailDomain: 'mail4.667410.xyz,mail5.667410.xyz,mail6.667410.xyz,mail7.667410.xyz,mail8.667410.xyz,mail9.667410.xyz,mail10.667410.xyz,mail11.667410.xyz,mail12.667410.xyz,baidu.667410.xyz,163.667410.xyz,gmail.667410.xyz,qq.667410.xyz,openai.667410.xyz,runtime.667410.xyz,edu.667410.xyz,google.667410.xyz,apple.667410.xyz,codex.667410.xyz',
+  smsProvider: SMS_PROVIDER_FIVESIM,
+  smsbowerApiKey: '',
+  smsbowerBaseUrl: SMSBOWER_DEFAULT_BASE_URL,
+  smsbowerService: 'dr',
+  smsbowerCountry: '0',
+  smsbowerMaxPrice: 0.08,
+  smsbowerMaxTries: 3,
+  smsbowerPollTimeoutSec: 120,
+  heroApiKey: '',
+  heroBaseUrl: HERO_DEFAULT_BASE_URL,
+  heroService: 'dr',
+  heroCountry: '0',
+  heroMaxPrice: 0.08,
+  heroMaxTries: 3,
+  heroPollTimeoutSec: 120,
+  fivesimApiKey: '',
+  fivesimService: 'openai',
+  fivesimCountry: 'any',
+  fivesimMaxPrice: 50,
+  fivesimMaxTries: 3,
+  fivesimPollTimeoutSec: 180,
   lastSignupCode: null,
 };
 
@@ -115,10 +147,81 @@ function normalizeVpsUrl(value) {
   return url;
 }
 
+function normalizeSmsProvider(value, fallback = SMS_PROVIDER_NONE) {
+  const provider = String(value || '').trim().toLowerCase();
+  if (
+    provider === SMS_PROVIDER_NONE
+    || provider === SMS_PROVIDER_AUTO
+    || provider === SMS_PROVIDER_SMSBOWER
+    || provider === SMS_PROVIDER_HERO
+    || provider === SMS_PROVIDER_FIVESIM
+  ) {
+    return provider;
+  }
+  return fallback;
+}
+
+function normalizeNumericString(value, fallback = '0') {
+  const raw = String(value ?? '').trim();
+  if (raw === '') return String(fallback);
+  return raw;
+}
+
+function toPositiveInteger(value, fallback) {
+  const num = Number.parseInt(String(value ?? ''), 10);
+  if (!Number.isFinite(num) || num <= 0) return fallback;
+  return num;
+}
+
+function toNonNegativeNumber(value, fallback = 0) {
+  const raw = String(value ?? '').trim();
+  if (raw === '') return fallback;
+  const num = Number.parseFloat(raw);
+  if (!Number.isFinite(num) || num < 0) return fallback;
+  return num;
+}
+
+function normalizeBaseUrl(value, fallback) {
+  const raw = String(value || '').trim();
+  return raw || fallback;
+}
+
+function applySmsStateDefaults(state) {
+  return {
+    ...state,
+    smsProvider: normalizeSmsProvider(state.smsProvider, DEFAULT_STATE.smsProvider),
+    smsbowerApiKey: String(state.smsbowerApiKey || '').trim(),
+    smsbowerBaseUrl: normalizeBaseUrl(state.smsbowerBaseUrl, SMSBOWER_DEFAULT_BASE_URL),
+    smsbowerService: String(state.smsbowerService || 'dr').trim() || 'dr',
+    smsbowerCountry: normalizeNumericString(state.smsbowerCountry, '0'),
+    smsbowerMaxPrice: toNonNegativeNumber(state.smsbowerMaxPrice, DEFAULT_STATE.smsbowerMaxPrice),
+    smsbowerMaxTries: toPositiveInteger(state.smsbowerMaxTries, 3),
+    smsbowerPollTimeoutSec: toPositiveInteger(state.smsbowerPollTimeoutSec, 120),
+    heroApiKey: String(state.heroApiKey || '').trim(),
+    heroBaseUrl: normalizeBaseUrl(state.heroBaseUrl, HERO_DEFAULT_BASE_URL),
+    heroService: String(state.heroService || 'dr').trim() || 'dr',
+    heroCountry: normalizeNumericString(state.heroCountry, '0'),
+    heroMaxPrice: toNonNegativeNumber(state.heroMaxPrice, DEFAULT_STATE.heroMaxPrice),
+    heroMaxTries: toPositiveInteger(state.heroMaxTries, 3),
+    heroPollTimeoutSec: toPositiveInteger(state.heroPollTimeoutSec, 120),
+    fivesimApiKey: String(state.fivesimApiKey || '').trim(),
+    fivesimService: String(state.fivesimService || 'openai').trim() || 'openai',
+    fivesimCountry: String(state.fivesimCountry || 'any').trim() || 'any',
+    fivesimMaxPrice: toNonNegativeNumber(state.fivesimMaxPrice, DEFAULT_STATE.fivesimMaxPrice),
+    fivesimMaxTries: toPositiveInteger(state.fivesimMaxTries, 3),
+    fivesimPollTimeoutSec: toPositiveInteger(state.fivesimPollTimeoutSec, 180),
+  };
+}
+
 async function getState() {
   const state = await chrome.storage.session.get(null);
   const merged = { ...DEFAULT_STATE, ...state };
-  return { ...merged, vpsUrl: normalizeVpsUrl(merged.vpsUrl) };
+  const normalized = {
+    ...merged,
+    vpsUrl: normalizeVpsUrl(merged.vpsUrl),
+    vpsType: normalizeVpsType(merged.vpsType),
+  };
+  return applySmsStateDefaults(normalized);
 }
 
 async function initializeSessionStorageAccess() {
@@ -173,6 +276,27 @@ async function resetState() {
     'freemailApiUrl',
     'freemailJwtToken',
     'freemailDomain',
+    'smsProvider',
+    'smsbowerApiKey',
+    'smsbowerBaseUrl',
+    'smsbowerService',
+    'smsbowerCountry',
+    'smsbowerMaxPrice',
+    'smsbowerMaxTries',
+    'smsbowerPollTimeoutSec',
+    'heroApiKey',
+    'heroBaseUrl',
+    'heroService',
+    'heroCountry',
+    'heroMaxPrice',
+    'heroMaxTries',
+    'heroPollTimeoutSec',
+    'fivesimApiKey',
+    'fivesimService',
+    'fivesimCountry',
+    'fivesimMaxPrice',
+    'fivesimMaxTries',
+    'fivesimPollTimeoutSec',
   ]);
   await chrome.storage.session.clear();
   await chrome.storage.session.set({
@@ -187,9 +311,30 @@ async function resetState() {
     mailProvider: prev.mailProvider || DEFAULT_STATE.mailProvider,
     inbucketHost: prev.inbucketHost || '',
     inbucketMailbox: prev.inbucketMailbox || '',
-    freemailApiUrl: prev.freemailApiUrl || '',
+    freemailApiUrl: prev.freemailApiUrl || DEFAULT_STATE.freemailApiUrl,
     freemailJwtToken: prev.freemailJwtToken || '',
-    freemailDomain: prev.freemailDomain || '',
+    freemailDomain: prev.freemailDomain || DEFAULT_STATE.freemailDomain,
+    smsProvider: normalizeSmsProvider(prev.smsProvider, DEFAULT_STATE.smsProvider),
+    smsbowerApiKey: String(prev.smsbowerApiKey || '').trim(),
+    smsbowerBaseUrl: normalizeBaseUrl(prev.smsbowerBaseUrl, SMSBOWER_DEFAULT_BASE_URL),
+    smsbowerService: String(prev.smsbowerService || 'dr').trim() || 'dr',
+    smsbowerCountry: normalizeNumericString(prev.smsbowerCountry, '0'),
+    smsbowerMaxPrice: toNonNegativeNumber(prev.smsbowerMaxPrice, DEFAULT_STATE.smsbowerMaxPrice),
+    smsbowerMaxTries: toPositiveInteger(prev.smsbowerMaxTries, 3),
+    smsbowerPollTimeoutSec: toPositiveInteger(prev.smsbowerPollTimeoutSec, 120),
+    heroApiKey: String(prev.heroApiKey || '').trim(),
+    heroBaseUrl: normalizeBaseUrl(prev.heroBaseUrl, HERO_DEFAULT_BASE_URL),
+    heroService: String(prev.heroService || 'dr').trim() || 'dr',
+    heroCountry: normalizeNumericString(prev.heroCountry, '0'),
+    heroMaxPrice: toNonNegativeNumber(prev.heroMaxPrice, DEFAULT_STATE.heroMaxPrice),
+    heroMaxTries: toPositiveInteger(prev.heroMaxTries, 3),
+    heroPollTimeoutSec: toPositiveInteger(prev.heroPollTimeoutSec, 120),
+    fivesimApiKey: String(prev.fivesimApiKey || '').trim(),
+    fivesimService: String(prev.fivesimService || 'openai').trim() || 'openai',
+    fivesimCountry: String(prev.fivesimCountry || 'any').trim() || 'any',
+    fivesimMaxPrice: toNonNegativeNumber(prev.fivesimMaxPrice, DEFAULT_STATE.fivesimMaxPrice),
+    fivesimMaxTries: toPositiveInteger(prev.fivesimMaxTries, 3),
+    fivesimPollTimeoutSec: toPositiveInteger(prev.fivesimPollTimeoutSec, 180),
   });
 }
 
@@ -681,6 +826,34 @@ async function sendToContentScript(source, message) {
 // Logging
 // ============================================================
 
+function mirrorLogToLocalSink(entry) {
+  if (!LOCAL_LOG_SINK_ENDPOINT) return;
+
+  const now = Date.now();
+  if (now < localLogSinkDisabledUntil) return;
+
+  const payload = {
+    ...entry,
+    isoTime: new Date(entry.timestamp).toISOString(),
+  };
+
+  fetch(LOCAL_LOG_SINK_ENDPOINT, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify(payload),
+    credentials: 'omit',
+  }).then((response) => {
+    if (!response.ok) {
+      throw new Error(`HTTP ${response.status}`);
+    }
+    localLogSinkDisabledUntil = 0;
+  }).catch(() => {
+    localLogSinkDisabledUntil = Date.now() + LOCAL_LOG_SINK_FAILURE_BACKOFF_MS;
+  });
+}
+
 async function addLog(message, level = 'info') {
   const state = await getState();
   const logs = state.logs || [];
@@ -691,6 +864,7 @@ async function addLog(message, level = 'info') {
   await setState({ logs });
   // Broadcast to side panel
   chrome.runtime.sendMessage({ type: 'LOG_ENTRY', payload: entry }).catch(() => {});
+  mirrorLogToLocalSink(entry);
 }
 
 // ============================================================
@@ -984,6 +1158,27 @@ async function handleMessage(message, sender) {
       if (message.payload.freemailApiUrl !== undefined) updates.freemailApiUrl = message.payload.freemailApiUrl;
       if (message.payload.freemailJwtToken !== undefined) updates.freemailJwtToken = message.payload.freemailJwtToken;
       if (message.payload.freemailDomain !== undefined) updates.freemailDomain = message.payload.freemailDomain;
+      if (message.payload.smsProvider !== undefined) updates.smsProvider = normalizeSmsProvider(message.payload.smsProvider);
+      if (message.payload.smsbowerApiKey !== undefined) updates.smsbowerApiKey = String(message.payload.smsbowerApiKey || '').trim();
+      if (message.payload.smsbowerBaseUrl !== undefined) updates.smsbowerBaseUrl = normalizeBaseUrl(message.payload.smsbowerBaseUrl, SMSBOWER_DEFAULT_BASE_URL);
+      if (message.payload.smsbowerService !== undefined) updates.smsbowerService = String(message.payload.smsbowerService || '').trim() || 'dr';
+      if (message.payload.smsbowerCountry !== undefined) updates.smsbowerCountry = normalizeNumericString(message.payload.smsbowerCountry, '0');
+      if (message.payload.smsbowerMaxPrice !== undefined) updates.smsbowerMaxPrice = toNonNegativeNumber(message.payload.smsbowerMaxPrice, DEFAULT_STATE.smsbowerMaxPrice);
+      if (message.payload.smsbowerMaxTries !== undefined) updates.smsbowerMaxTries = toPositiveInteger(message.payload.smsbowerMaxTries, 3);
+      if (message.payload.smsbowerPollTimeoutSec !== undefined) updates.smsbowerPollTimeoutSec = toPositiveInteger(message.payload.smsbowerPollTimeoutSec, 120);
+      if (message.payload.heroApiKey !== undefined) updates.heroApiKey = String(message.payload.heroApiKey || '').trim();
+      if (message.payload.heroBaseUrl !== undefined) updates.heroBaseUrl = normalizeBaseUrl(message.payload.heroBaseUrl, HERO_DEFAULT_BASE_URL);
+      if (message.payload.heroService !== undefined) updates.heroService = String(message.payload.heroService || '').trim() || 'dr';
+      if (message.payload.heroCountry !== undefined) updates.heroCountry = normalizeNumericString(message.payload.heroCountry, '0');
+      if (message.payload.heroMaxPrice !== undefined) updates.heroMaxPrice = toNonNegativeNumber(message.payload.heroMaxPrice, DEFAULT_STATE.heroMaxPrice);
+      if (message.payload.heroMaxTries !== undefined) updates.heroMaxTries = toPositiveInteger(message.payload.heroMaxTries, 3);
+      if (message.payload.heroPollTimeoutSec !== undefined) updates.heroPollTimeoutSec = toPositiveInteger(message.payload.heroPollTimeoutSec, 120);
+      if (message.payload.fivesimApiKey !== undefined) updates.fivesimApiKey = String(message.payload.fivesimApiKey || '').trim();
+      if (message.payload.fivesimService !== undefined) updates.fivesimService = String(message.payload.fivesimService || '').trim() || 'openai';
+      if (message.payload.fivesimCountry !== undefined) updates.fivesimCountry = String(message.payload.fivesimCountry || '').trim() || 'any';
+      if (message.payload.fivesimMaxPrice !== undefined) updates.fivesimMaxPrice = toNonNegativeNumber(message.payload.fivesimMaxPrice, DEFAULT_STATE.fivesimMaxPrice);
+      if (message.payload.fivesimMaxTries !== undefined) updates.fivesimMaxTries = toPositiveInteger(message.payload.fivesimMaxTries, 3);
+      if (message.payload.fivesimPollTimeoutSec !== undefined) updates.fivesimPollTimeoutSec = toPositiveInteger(message.payload.fivesimPollTimeoutSec, 180);
       await setState(updates);
       return { ok: true };
     }
@@ -1003,7 +1198,7 @@ async function handleMessage(message, sender) {
     case 'FETCH_PROVIDER_EMAIL': {
       clearStopRequest();
       const state = await getState();
-      const provider = message.payload?.provider || state.mailProvider || '163';
+      const provider = message.payload?.provider || state.mailProvider || DEFAULT_STATE.mailProvider;
       const email = await fetchEmailForProvider(provider, state, message.payload || {});
       return { ok: true, email };
     }
@@ -1251,14 +1446,17 @@ async function refreshOAuthUrlForAuthorizationRecovery() {
 }
 
 async function executeAuthorizationFlowWithRecovery(maxAttempts = AUTH_FLOW_MAX_RECOVERY_ATTEMPTS) {
+  const stateBeforeFlow = await getState();
+  if (stateBeforeFlow.stepStatuses?.[6] !== 'completed') {
+    await setStepStatus(6, 'completed');
+  }
+  if (stateBeforeFlow.stepStatuses?.[7] !== 'completed') {
+    await setStepStatus(7, 'completed');
+  }
+  await addLog('Legacy step 6/7 skipped: current flow goes directly from profile to OAuth confirm.', 'info');
+
   for (let attempt = 1; attempt <= maxAttempts; attempt++) {
     try {
-      await executeStepAndWait(6, 3000);
-      try {
-        await executeStepAndWait(7, 2000);
-      } catch (err) {
-        throw withStepContext(7, err);
-      }
       try {
         await executeStepAndWait(8, 2000);
       } catch (err) {
@@ -1271,17 +1469,17 @@ async function executeAuthorizationFlowWithRecovery(maxAttempts = AUTH_FLOW_MAX_
       }
       return;
     } catch (err) {
-      const failedStep = err?.step || 6;
+      const failedStep = err?.step || 8;
       if (attempt >= maxAttempts || !isRecoverableAuthError(failedStep, err)) {
         throw err;
       }
 
-      await invalidateFutureState(6, 'authorization recovery');
+      await invalidateFutureState(8, 'authorization recovery');
 
       const state = await getState();
       if (shouldRefreshOAuthUrlDuringAuthRecovery(state, failedStep, err)) {
         await addLog(
-          `Auth recovery ${attempt}/${maxAttempts}: step ${failedStep} hit an expired codeProxy OAuth callback (${err.message}). Refreshing step 1, then restarting from step 6...`,
+          `Auth recovery ${attempt}/${maxAttempts}: step ${failedStep} hit an expired codeProxy OAuth callback (${err.message}). Refreshing step 1, then restarting from step 8...`,
           'warn'
         );
         await refreshOAuthUrlForAuthorizationRecovery();
@@ -1289,7 +1487,7 @@ async function executeAuthorizationFlowWithRecovery(maxAttempts = AUTH_FLOW_MAX_
       }
 
       await addLog(
-        `Auth recovery ${attempt}/${maxAttempts}: step ${failedStep} failed with recoverable error: ${err.message}. Restarting from step 6...`,
+        `Auth recovery ${attempt}/${maxAttempts}: step ${failedStep} failed with recoverable error: ${err.message}. Restarting from step 8...`,
         'warn'
       );
     }
@@ -1300,12 +1498,12 @@ async function executeManualStepWithRecovery(step) {
   try {
     await executeStep(step);
   } catch (err) {
-    if (step >= 7 && step <= 9 && isRecoverableAuthError(step, err)) {
+    if (step >= 8 && step <= 9 && isRecoverableAuthError(step, err)) {
       const state = await getState();
       if (shouldRefreshOAuthUrlDuringAuthRecovery(state, step, err)) {
-        await addLog(`Step ${step}: codeProxy OAuth callback expired. Refreshing step 1, then restarting authorization from step 6...`, 'warn');
+        await addLog(`Step ${step}: codeProxy OAuth callback expired. Refreshing step 1, then restarting authorization from step 8...`, 'warn');
       } else {
-        await addLog(`Step ${step}: recoverable auth error detected. Restarting authorization from step 6...`, 'warn');
+        await addLog(`Step ${step}: recoverable auth error detected. Restarting authorization from step 8...`, 'warn');
       }
       await executeAuthorizationFlowWithRecovery();
       return;
@@ -1763,6 +1961,7 @@ async function autoRunLoop(totalRuns) {
   clearStopRequest();
   autoRunActive = true;
   autoRunTotalRuns = totalRuns;
+  let abortedByError = false;
   await setState({ autoRunning: true });
 
   for (let run = 1; run <= totalRuns; run++) {
@@ -1779,6 +1978,27 @@ async function autoRunLoop(totalRuns) {
       freemailApiUrl: prevState.freemailApiUrl,
       freemailJwtToken: prevState.freemailJwtToken,
       freemailDomain: prevState.freemailDomain,
+      smsProvider: prevState.smsProvider,
+      smsbowerApiKey: prevState.smsbowerApiKey,
+      smsbowerBaseUrl: prevState.smsbowerBaseUrl,
+      smsbowerService: prevState.smsbowerService,
+      smsbowerCountry: prevState.smsbowerCountry,
+      smsbowerMaxPrice: prevState.smsbowerMaxPrice,
+      smsbowerMaxTries: prevState.smsbowerMaxTries,
+      smsbowerPollTimeoutSec: prevState.smsbowerPollTimeoutSec,
+      heroApiKey: prevState.heroApiKey,
+      heroBaseUrl: prevState.heroBaseUrl,
+      heroService: prevState.heroService,
+      heroCountry: prevState.heroCountry,
+      heroMaxPrice: prevState.heroMaxPrice,
+      heroMaxTries: prevState.heroMaxTries,
+      heroPollTimeoutSec: prevState.heroPollTimeoutSec,
+      fivesimApiKey: prevState.fivesimApiKey,
+      fivesimService: prevState.fivesimService,
+      fivesimCountry: prevState.fivesimCountry,
+      fivesimMaxPrice: prevState.fivesimMaxPrice,
+      fivesimMaxTries: prevState.fivesimMaxTries,
+      fivesimPollTimeoutSec: prevState.fivesimPollTimeoutSec,
       autoRunning: true,
     };
     await resetState();
@@ -1799,7 +2019,7 @@ async function autoRunLoop(totalRuns) {
       await executeStepAndWait(2, 2000);
 
       let emailReady = false;
-      const provider = (prevState.mailProvider || '163').trim();
+      const provider = (prevState.mailProvider || DEFAULT_STATE.mailProvider).trim();
       try {
         const currentState = await getState();
         const autoEmail = await fetchEmailForProviderWithRetries(provider, currentState, { generateNew: true });
@@ -1848,6 +2068,7 @@ async function autoRunLoop(totalRuns) {
         await addLog(`Run ${run}/${totalRuns} stopped by user`, 'warn');
       } else {
         await addLog(`Run ${run}/${totalRuns} failed: ${err.message}`, 'error');
+        abortedByError = true;
       }
       chrome.runtime.sendMessage(status('stopped')).catch(() => {});
       break; // Stop on error
@@ -1857,6 +2078,9 @@ async function autoRunLoop(totalRuns) {
   const completedRuns = autoRunCurrentRun;
   if (stopRequested) {
     await addLog(`=== Stopped after ${Math.max(0, completedRuns - 1)}/${autoRunTotalRuns} runs ===`, 'warn');
+    chrome.runtime.sendMessage({ type: 'AUTO_RUN_STATUS', payload: { phase: 'stopped', currentRun: completedRuns, totalRuns: autoRunTotalRuns } }).catch(() => {});
+  } else if (abortedByError) {
+    await addLog(`=== Auto run stopped due to failure at run ${completedRuns}/${autoRunTotalRuns} ===`, 'error');
     chrome.runtime.sendMessage({ type: 'AUTO_RUN_STATUS', payload: { phase: 'stopped', currentRun: completedRuns, totalRuns: autoRunTotalRuns } }).catch(() => {});
   } else if (completedRuns >= autoRunTotalRuns) {
     await addLog(`=== All ${autoRunTotalRuns} runs completed successfully ===`, 'ok');
@@ -1971,7 +2195,7 @@ async function executeStep3(state) {
 // ============================================================
 
 function getMailConfig(state) {
-  const provider = state.mailProvider || 'qq';
+  const provider = state.mailProvider || DEFAULT_STATE.mailProvider;
   if (provider === '163') {
     return {
       source: 'mail-163',
@@ -2225,6 +2449,562 @@ async function executeStep4(state) {
   });
   await fillVerificationCodeForStep(4, result);
 }
+
+function extractSixDigitCode(rawText = '') {
+  const match = String(rawText || '').match(/(\d{6})/);
+  return match ? match[1] : '';
+}
+
+function normalizePhoneNumber(rawPhone = '') {
+  const cleaned = String(rawPhone || '').trim().replace(/[^\d+]/g, '');
+  if (!cleaned) return '';
+  if (cleaned.startsWith('+')) return cleaned;
+  return `+${cleaned}`;
+}
+
+async function fetchTextWithTimeout(url, options = {}, timeoutMs = 25000) {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    const response = await fetch(url, {
+      ...options,
+      signal: controller.signal,
+    });
+    const text = await response.text();
+    return { response, text };
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+function parseJsonSafe(text) {
+  if (!text) return null;
+  try {
+    return JSON.parse(text);
+  } catch {
+    return null;
+  }
+}
+
+async function requestStubSmsApi(baseUrl, apiKey, action, params = {}, timeoutMs = 25000) {
+  const endpoint = normalizeBaseUrl(baseUrl, '');
+  if (!endpoint) {
+    return { ok: false, text: 'NO_BASE_URL', data: null };
+  }
+
+  const url = new URL(endpoint);
+  url.searchParams.set('action', String(action || '').trim());
+  url.searchParams.set('api_key', String(apiKey || '').trim());
+  for (const [key, value] of Object.entries(params || {})) {
+    if (value === null || value === undefined) continue;
+    const textValue = String(value).trim();
+    if (!textValue) continue;
+    url.searchParams.set(key, textValue);
+  }
+
+  try {
+    const { response, text } = await fetchTextWithTimeout(url.toString(), {
+      method: 'GET',
+      credentials: 'omit',
+    }, timeoutMs);
+    const data = parseJsonSafe(text);
+    const ok = response.status >= 200 && response.status < 300;
+    return { ok, text: String(text || '').trim(), data, status: response.status };
+  } catch (err) {
+    return { ok: false, text: `REQUEST_ERROR:${err.message}`, data: null };
+  }
+}
+
+async function requestFiveSimApi(apiKey, method, endpoint, params = {}, timeoutMs = 25000) {
+  const url = new URL(`https://5sim.net/v1/${String(endpoint || '').replace(/^\//, '')}`);
+  for (const [key, value] of Object.entries(params || {})) {
+    if (value === null || value === undefined) continue;
+    const textValue = String(value).trim();
+    if (!textValue) continue;
+    url.searchParams.set(key, textValue);
+  }
+
+  try {
+    const { response, text } = await fetchTextWithTimeout(url.toString(), {
+      method,
+      headers: {
+        Accept: 'application/json',
+        Authorization: `Bearer ${apiKey}`,
+      },
+      credentials: 'omit',
+    }, timeoutMs);
+    const data = parseJsonSafe(text);
+    const ok = response.status >= 200 && response.status < 300;
+    return { ok, text: String(text || '').trim(), data, status: response.status };
+  } catch (err) {
+    return { ok: false, text: `REQUEST_ERROR:${err.message}`, data: null, status: 0 };
+  }
+}
+
+function isAddPhoneInterception(result) {
+  return Boolean(result?.addPhonePage || result?.isAddPhonePage);
+}
+
+async function ensureSignupPageAvailable() {
+  const signupTabId = await getTabId('signup-page');
+  if (!signupTabId) {
+    throw new Error('Signup page tab was closed. Cannot continue add-phone verification.');
+  }
+  await chrome.tabs.update(signupTabId, { active: true });
+  return signupTabId;
+}
+
+async function checkAddPhonePageVisible() {
+  await ensureSignupPageAvailable();
+  const result = await sendToContentScript('signup-page', {
+    type: 'CHECK_ADD_PHONE_PAGE',
+    step: 5,
+    source: 'background',
+    payload: {},
+  });
+  return Boolean(result?.isAddPhonePage);
+}
+
+async function waitForAddPhoneExit(timeoutMs = 20000) {
+  const startedAt = Date.now();
+  while (Date.now() - startedAt < timeoutMs) {
+    throwIfStopped();
+    const stillOnAddPhone = await checkAddPhonePageVisible();
+    if (!stillOnAddPhone) {
+      return true;
+    }
+    await sleepWithStop(500);
+  }
+  return false;
+}
+
+async function sendPhoneForSmsCode(phoneNumber) {
+  await ensureSignupPageAvailable();
+  const result = await sendToContentScript('signup-page', {
+    type: 'PHONE_SEND_CODE',
+    step: 5,
+    source: 'background',
+    payload: { phoneNumber, suppressStepError: true },
+  });
+  if (result?.error) {
+    throw new Error(result.error);
+  }
+  return result || {};
+}
+
+async function fillPhoneOtpCode(code) {
+  await ensureSignupPageAvailable();
+  const result = await sendToContentScript('signup-page', {
+    type: 'PHONE_FILL_CODE',
+    step: 5,
+    source: 'background',
+    payload: { code, suppressStepError: true },
+  });
+  if (result?.error) {
+    throw new Error(result.error);
+  }
+  return result || {};
+}
+
+async function smsbowerSetStatus(state, activationId, status) {
+  if (!activationId) return;
+  await requestStubSmsApi(
+    state.smsbowerBaseUrl,
+    state.smsbowerApiKey,
+    'setStatus',
+    { id: activationId, status: String(status) },
+    20000
+  );
+}
+
+async function smsbowerGetNumber(state) {
+  const maxPrice = toNonNegativeNumber(state.smsbowerMaxPrice, DEFAULT_STATE.smsbowerMaxPrice);
+  const params = {
+    service: state.smsbowerService || 'dr',
+    country: state.smsbowerCountry || '0',
+  };
+  if (maxPrice > 0) {
+    params.maxPrice = maxPrice;
+  }
+  const response = await requestStubSmsApi(
+    state.smsbowerBaseUrl,
+    state.smsbowerApiKey,
+    'getNumberV2',
+    params,
+    30000
+  );
+
+  if (!response.ok) {
+    throw new Error(`SmsBower getNumber failed: ${response.text || 'unknown error'}`);
+  }
+
+  let activationId = '';
+  let phone = '';
+  if (response.data && typeof response.data === 'object') {
+    activationId = String(response.data.activationId || response.data.id || '').trim();
+    phone = String(response.data.phoneNumber || response.data.phone || '').trim();
+  }
+
+  if (!activationId || !phone) {
+    const line = String(response.text || '').trim();
+    if (line.toUpperCase().startsWith('ACCESS_NUMBER:')) {
+      const parts = line.split(':');
+      activationId = String(parts[1] || '').trim();
+      phone = String(parts[2] || '').trim();
+    }
+  }
+
+  const normalizedPhone = normalizePhoneNumber(phone);
+  if (!activationId || !normalizedPhone) {
+    throw new Error(`SmsBower returned invalid number payload: ${response.text || 'empty'}`);
+  }
+
+  const rawCost = response.data && typeof response.data === 'object'
+    ? (response.data.activationCost ?? response.data.cost ?? response.data.price)
+    : null;
+  const cost = Number.parseFloat(String(rawCost ?? ''));
+  if (maxPrice > 0 && Number.isFinite(cost) && cost > maxPrice) {
+    throw new Error(`SmsBower 价格拦截：$${cost} > 最大单价 $${maxPrice}`);
+  }
+
+  return { activationId, phoneNumber: normalizedPhone };
+}
+
+async function smsbowerPollCode(state, activationId) {
+  const timeoutSec = Math.max(30, toPositiveInteger(state.smsbowerPollTimeoutSec, 120));
+  const startedAt = Date.now();
+
+  while ((Date.now() - startedAt) < timeoutSec * 1000) {
+    throwIfStopped();
+    const response = await requestStubSmsApi(
+      state.smsbowerBaseUrl,
+      state.smsbowerApiKey,
+      'getStatus',
+      { id: activationId },
+      20000
+    );
+    const upper = String(response.text || '').trim().toUpperCase();
+    if (response.ok && upper.startsWith('STATUS_OK')) {
+      const code = extractSixDigitCode(response.text);
+      if (code) return code;
+    }
+    if (upper.includes('STATUS_CANCEL') || upper.includes('NO_ACTIVATION') || upper.includes('BAD_STATUS')) {
+      return '';
+    }
+    await sleepWithStop(3000);
+  }
+  return '';
+}
+
+async function heroSetStatus(state, activationId, status) {
+  if (!activationId) return;
+  await requestStubSmsApi(
+    state.heroBaseUrl,
+    state.heroApiKey,
+    'setStatus',
+    { id: activationId, status: String(status) },
+    20000
+  );
+}
+
+async function heroGetNumber(state) {
+  const maxPrice = toNonNegativeNumber(state.heroMaxPrice, DEFAULT_STATE.heroMaxPrice);
+  const params = {
+    service: state.heroService || 'dr',
+    country: state.heroCountry || '0',
+  };
+  if (maxPrice > 0) {
+    params.maxPrice = maxPrice;
+  }
+  const response = await requestStubSmsApi(
+    state.heroBaseUrl,
+    state.heroApiKey,
+    'getNumber',
+    params,
+    30000
+  );
+  if (!response.ok) {
+    throw new Error(`HeroSMS getNumber failed: ${response.text || 'unknown error'}`);
+  }
+
+  let activationId = '';
+  let phone = '';
+  if (response.data && typeof response.data === 'object') {
+    activationId = String(response.data.activationId || response.data.activation_id || response.data.id || '').trim();
+    phone = String(response.data.phoneNumber || response.data.phone || response.data.number || '').trim();
+  }
+
+  if (!activationId || !phone) {
+    const line = String(response.text || '').trim();
+    if (line.toUpperCase().startsWith('ACCESS_NUMBER:')) {
+      const parts = line.split(':');
+      activationId = String(parts[1] || '').trim();
+      phone = String(parts[2] || '').trim();
+    }
+  }
+
+  const normalizedPhone = normalizePhoneNumber(phone);
+  if (!activationId || !normalizedPhone) {
+    throw new Error(`HeroSMS returned invalid number payload: ${response.text || 'empty'}`);
+  }
+
+  const rawCost = response.data && typeof response.data === 'object'
+    ? (response.data.activationCost ?? response.data.cost ?? response.data.price)
+    : null;
+  const cost = Number.parseFloat(String(rawCost ?? ''));
+  if (maxPrice > 0 && Number.isFinite(cost) && cost > maxPrice) {
+    throw new Error(`HeroSMS 价格拦截：$${cost} > 最大单价 $${maxPrice}`);
+  }
+
+  return { activationId, phoneNumber: normalizedPhone };
+}
+
+async function heroPollCode(state, activationId) {
+  const timeoutSec = Math.max(30, toPositiveInteger(state.heroPollTimeoutSec, 120));
+  const startedAt = Date.now();
+  while ((Date.now() - startedAt) < timeoutSec * 1000) {
+    throwIfStopped();
+    const response = await requestStubSmsApi(
+      state.heroBaseUrl,
+      state.heroApiKey,
+      'getStatus',
+      { id: activationId },
+      20000
+    );
+    const upper = String(response.text || '').trim().toUpperCase();
+    if (response.ok && upper.startsWith('STATUS_OK')) {
+      const code = extractSixDigitCode(response.text);
+      if (code) return code;
+    }
+    if (upper.includes('STATUS_CANCEL') || upper.includes('NO_ACTIVATION') || upper.includes('BAD_STATUS')) {
+      return '';
+    }
+    await sleepWithStop(3000);
+  }
+  return '';
+}
+
+async function fiveSimSetStatus(apiKey, action, orderId) {
+  if (!orderId) return;
+  await requestFiveSimApi(apiKey, 'GET', `user/${action}/${orderId}`, {}, 20000);
+}
+
+async function fiveSimGetNumber(state) {
+  const country = String(state.fivesimCountry || 'any').trim() || 'any';
+  const service = String(state.fivesimService || 'openai').trim() || 'openai';
+  const maxPrice = toNonNegativeNumber(state.fivesimMaxPrice, DEFAULT_STATE.fivesimMaxPrice);
+  const params = {};
+  if (maxPrice > 0) {
+    params.maxPrice = maxPrice;
+  }
+  const response = await requestFiveSimApi(
+    state.fivesimApiKey,
+    'GET',
+    `user/buy/activation/${encodeURIComponent(country)}/any/${encodeURIComponent(service)}`,
+    params,
+    30000
+  );
+  if (!response.ok || !response.data || !response.data.id || !response.data.phone) {
+    throw new Error(`5SIM getNumber failed: ${response.text || 'unknown error'}`);
+  }
+  const orderId = String(response.data.id);
+  const price = Number.parseFloat(String(response.data.price ?? ''));
+  if (maxPrice > 0 && Number.isFinite(price) && price > maxPrice) {
+    await fiveSimSetStatus(state.fivesimApiKey, 'cancel', orderId);
+    throw new Error(`5SIM 价格拦截：$${price} > 最大单价 $${maxPrice}`);
+  }
+  return {
+    orderId,
+    phoneNumber: normalizePhoneNumber(String(response.data.phone)),
+  };
+}
+
+async function fiveSimPollCode(state, orderId) {
+  const timeoutSec = Math.max(30, toPositiveInteger(state.fivesimPollTimeoutSec, 180));
+  const startedAt = Date.now();
+  while ((Date.now() - startedAt) < timeoutSec * 1000) {
+    throwIfStopped();
+    const response = await requestFiveSimApi(state.fivesimApiKey, 'GET', `user/check/${orderId}`, {}, 20000);
+    const data = response.data && typeof response.data === 'object' ? response.data : null;
+
+    if (response.ok && data) {
+      const status = String(data.status || '').toUpperCase();
+      if (status === 'RECEIVED' || status === 'PENDING') {
+        const smsList = Array.isArray(data.sms) ? data.sms : [];
+        for (const item of smsList) {
+          const code = extractSixDigitCode(item?.code || item?.text || '');
+          if (code) return code;
+        }
+      }
+      if (status === 'CANCELED' || status === 'BANNED' || status === 'TIMEOUT') {
+        return '';
+      }
+    }
+    await sleepWithStop(3000);
+  }
+  return '';
+}
+
+function getSmsProviderQueue(state) {
+  const provider = normalizeSmsProvider(state.smsProvider);
+  if (provider === SMS_PROVIDER_NONE) return [];
+  if (provider === SMS_PROVIDER_AUTO) return [...SMS_PROVIDER_FALLBACK_ORDER];
+  return [provider];
+}
+
+function smsProviderIsConfigured(provider, state) {
+  if (provider === SMS_PROVIDER_SMSBOWER) return Boolean(String(state.smsbowerApiKey || '').trim());
+  if (provider === SMS_PROVIDER_HERO) return Boolean(String(state.heroApiKey || '').trim());
+  if (provider === SMS_PROVIDER_FIVESIM) return Boolean(String(state.fivesimApiKey || '').trim());
+  return false;
+}
+
+async function verifyAddPhoneWithSmsbower(state) {
+  const maxTries = Math.max(1, toPositiveInteger(state.smsbowerMaxTries, 3));
+  let lastError = new Error('SmsBower verification failed.');
+  for (let attempt = 1; attempt <= maxTries; attempt++) {
+    throwIfStopped();
+    let activationId = '';
+    try {
+      await addLog(`Step 5: [SmsBower] Requesting phone number (${attempt}/${maxTries})...`, 'info');
+      const number = await smsbowerGetNumber(state);
+      activationId = number.activationId;
+      const sendResult = await sendPhoneForSmsCode(number.phoneNumber);
+      if (!sendResult?.codeInputReady) {
+        throw new Error('SmsBower: phone OTP input did not appear after send.');
+      }
+      await addLog('Step 5: [SmsBower] Waiting for SMS code...', 'info');
+      const smsCode = await smsbowerPollCode(state, activationId);
+      if (!smsCode) {
+        throw new Error('SmsBower did not return OTP before timeout.');
+      }
+      await addLog(`Step 5: [SmsBower] Got SMS code: ${smsCode}`, 'ok');
+      const verifyResult = await fillPhoneOtpCode(smsCode);
+      if (verifyResult?.verified && verifyResult?.codeFilled) {
+        await smsbowerSetStatus(state, activationId, 6);
+        await addLog('Step 5: [SmsBower] Phone verification passed.', 'ok');
+        return true;
+      }
+      throw new Error(verifyResult?.error || 'Phone verification page did not pass after OTP submit/fill.');
+    } catch (err) {
+      lastError = err instanceof Error ? err : new Error(String(err));
+      await smsbowerSetStatus(state, activationId, 8);
+      await addLog(`Step 5: [SmsBower] attempt ${attempt} failed: ${lastError.message}`, 'warn');
+    }
+  }
+  throw lastError;
+}
+
+async function verifyAddPhoneWithHero(state) {
+  const maxTries = Math.max(1, toPositiveInteger(state.heroMaxTries, 3));
+  let lastError = new Error('HeroSMS verification failed.');
+  for (let attempt = 1; attempt <= maxTries; attempt++) {
+    throwIfStopped();
+    let activationId = '';
+    try {
+      await addLog(`Step 5: [HeroSMS] Requesting phone number (${attempt}/${maxTries})...`, 'info');
+      const number = await heroGetNumber(state);
+      activationId = number.activationId;
+      await heroSetStatus(state, activationId, 1);
+      const sendResult = await sendPhoneForSmsCode(number.phoneNumber);
+      if (!sendResult?.codeInputReady) {
+        throw new Error('HeroSMS: phone OTP input did not appear after send.');
+      }
+      await addLog('Step 5: [HeroSMS] Waiting for SMS code...', 'info');
+      const smsCode = await heroPollCode(state, activationId);
+      if (!smsCode) {
+        throw new Error('HeroSMS did not return OTP before timeout.');
+      }
+      await addLog(`Step 5: [HeroSMS] Got SMS code: ${smsCode}`, 'ok');
+      const verifyResult = await fillPhoneOtpCode(smsCode);
+      if (verifyResult?.verified && verifyResult?.codeFilled) {
+        await heroSetStatus(state, activationId, 6);
+        await addLog('Step 5: [HeroSMS] Phone verification passed.', 'ok');
+        return true;
+      }
+      throw new Error(verifyResult?.error || 'Phone verification page did not pass after OTP submit/fill.');
+    } catch (err) {
+      lastError = err instanceof Error ? err : new Error(String(err));
+      await heroSetStatus(state, activationId, 8);
+      await addLog(`Step 5: [HeroSMS] attempt ${attempt} failed: ${lastError.message}`, 'warn');
+    }
+  }
+  throw lastError;
+}
+
+async function verifyAddPhoneWithFiveSim(state) {
+  const maxTries = Math.max(1, toPositiveInteger(state.fivesimMaxTries, 3));
+  let lastError = new Error('5SIM verification failed.');
+  for (let attempt = 1; attempt <= maxTries; attempt++) {
+    throwIfStopped();
+    let orderId = '';
+    try {
+      await addLog(`Step 5: [5SIM] Requesting phone number (${attempt}/${maxTries})...`, 'info');
+      const number = await fiveSimGetNumber(state);
+      orderId = number.orderId;
+      const sendResult = await sendPhoneForSmsCode(number.phoneNumber);
+      if (!sendResult?.codeInputReady) {
+        throw new Error('5SIM: phone OTP input did not appear after send.');
+      }
+      await addLog('Step 5: [5SIM] Waiting for SMS code...', 'info');
+      const smsCode = await fiveSimPollCode(state, orderId);
+      if (!smsCode) {
+        throw new Error('5SIM did not return OTP before timeout.');
+      }
+      await addLog(`Step 5: [5SIM] Got SMS code: ${smsCode}`, 'ok');
+      const verifyResult = await fillPhoneOtpCode(smsCode);
+      if (verifyResult?.verified && verifyResult?.codeFilled) {
+        await fiveSimSetStatus(state.fivesimApiKey, 'finish', orderId);
+        await addLog('Step 5: [5SIM] Phone verification passed.', 'ok');
+        return true;
+      }
+      throw new Error(verifyResult?.error || 'Phone verification page did not pass after OTP submit/fill.');
+    } catch (err) {
+      lastError = err instanceof Error ? err : new Error(String(err));
+      await fiveSimSetStatus(state.fivesimApiKey, 'ban', orderId);
+      await addLog(`Step 5: [5SIM] attempt ${attempt} failed: ${lastError.message}`, 'warn');
+    }
+  }
+  throw lastError;
+}
+
+async function handleAddPhoneVerification(state) {
+  const providerQueue = getSmsProviderQueue(state).filter((provider) => smsProviderIsConfigured(provider, state));
+  if (!providerQueue.length) {
+    throw new Error('Step 5: add-phone detected, but SMS provider is not configured.');
+  }
+
+  await addLog(`Step 5: add-phone detected. Provider queue: ${providerQueue.join(' -> ')}`, 'warn');
+
+  let lastError = null;
+  for (const provider of providerQueue) {
+    throwIfStopped();
+    try {
+      if (provider === SMS_PROVIDER_SMSBOWER) {
+        await verifyAddPhoneWithSmsbower(state);
+      } else if (provider === SMS_PROVIDER_HERO) {
+        await verifyAddPhoneWithHero(state);
+      } else if (provider === SMS_PROVIDER_FIVESIM) {
+        await verifyAddPhoneWithFiveSim(state);
+      } else {
+        continue;
+      }
+
+      const resolved = await waitForAddPhoneExit(22000);
+      if (!resolved) {
+        throw new Error(`Provider ${provider} finished but page is still add-phone.`);
+      }
+
+      await addLog(`Step 5: add-phone verification completed by ${provider}.`, 'ok');
+      return;
+    } catch (err) {
+      lastError = err instanceof Error ? err : new Error(String(err));
+      await addLog(`Step 5: provider ${provider} failed: ${lastError.message}`, 'warn');
+    }
+  }
+
+  throw lastError || new Error('All SMS providers failed on add-phone verification.');
+}
 // ============================================================
 // Step 5: Fill Name & Birthday (via signup-page.js)
 // ============================================================
@@ -2232,15 +3012,36 @@ async function executeStep4(state) {
 async function executeStep5(state) {
   const { firstName, lastName } = generateRandomName();
   const { year, month, day } = generateRandomBirthday();
+  const profilePayload = { firstName, lastName, year, month, day };
 
   await addLog(`Step 5: Generated name: ${firstName} ${lastName}, Birthday: ${year}-${month}-${day}`);
 
-  await sendToContentScript('signup-page', {
+  // New flow: after step 4, some sessions land on /add-phone first.
+  // In that case we finish phone verification first, then try deferred profile fill.
+  const addPhoneAtStart = await checkAddPhonePageVisible().catch(() => false);
+  if (addPhoneAtStart) {
+    await addLog('Step 5: Detected add-phone page first, running phone verification before profile fill.', 'warn');
+    await handleAddPhoneVerification(state);
+
+    await sendToContentScript('signup-page', {
+      type: 'EXECUTE_STEP',
+      step: 5,
+      source: 'background',
+      payload: { ...profilePayload, skipIfNoProfile: true },
+    });
+    return;
+  }
+
+  const result = await sendToContentScript('signup-page', {
     type: 'EXECUTE_STEP',
     step: 5,
     source: 'background',
-    payload: { firstName, lastName, year, month, day },
+    payload: profilePayload,
   });
+
+  if (isAddPhoneInterception(result)) {
+    await handleAddPhoneVerification(state);
+  }
 }
 
 // ============================================================

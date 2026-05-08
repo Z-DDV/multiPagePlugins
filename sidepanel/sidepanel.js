@@ -27,6 +27,7 @@ const btnClearLog = document.getElementById('btn-clear-log');
 const inputVpsUrl = document.getElementById('input-vps-url');
 const selectVpsType = document.getElementById('select-vps-type');
 const selectMailProvider = document.getElementById('select-mail-provider');
+const selectSmsProvider = document.getElementById('select-sms-provider');
 const rowInbucketHost = document.getElementById('row-inbucket-host');
 const inputInbucketHost = document.getElementById('input-inbucket-host');
 const rowInbucketMailbox = document.getElementById('row-inbucket-mailbox');
@@ -37,10 +38,56 @@ const rowFreemailJwtToken = document.getElementById('row-freemail-jwt-token');
 const inputFreemailJwtToken = document.getElementById('input-freemail-jwt-token');
 const rowFreemailDomain = document.getElementById('row-freemail-domain');
 const inputFreemailDomain = document.getElementById('input-freemail-domain');
+const rowSmsbowerKey = document.getElementById('row-smsbower-key');
+const inputSmsbowerKey = document.getElementById('input-smsbower-key');
+const rowSmsbowerBaseUrl = document.getElementById('row-smsbower-base-url');
+const inputSmsbowerBaseUrl = document.getElementById('input-smsbower-base-url');
+const rowSmsbowerService = document.getElementById('row-smsbower-service');
+const inputSmsbowerService = document.getElementById('input-smsbower-service');
+const rowSmsbowerCountry = document.getElementById('row-smsbower-country');
+const inputSmsbowerCountry = document.getElementById('input-smsbower-country');
+const rowSmsbowerMaxPrice = document.getElementById('row-smsbower-max-price');
+const inputSmsbowerMaxPrice = document.getElementById('input-smsbower-max-price');
+const rowSmsbowerMaxTries = document.getElementById('row-smsbower-max-tries');
+const inputSmsbowerMaxTries = document.getElementById('input-smsbower-max-tries');
+const rowSmsbowerTimeout = document.getElementById('row-smsbower-timeout');
+const inputSmsbowerTimeout = document.getElementById('input-smsbower-timeout');
+const rowHeroKey = document.getElementById('row-hero-key');
+const inputHeroKey = document.getElementById('input-hero-key');
+const rowHeroBaseUrl = document.getElementById('row-hero-base-url');
+const inputHeroBaseUrl = document.getElementById('input-hero-base-url');
+const rowHeroService = document.getElementById('row-hero-service');
+const inputHeroService = document.getElementById('input-hero-service');
+const rowHeroCountry = document.getElementById('row-hero-country');
+const inputHeroCountry = document.getElementById('input-hero-country');
+const rowHeroMaxPrice = document.getElementById('row-hero-max-price');
+const inputHeroMaxPrice = document.getElementById('input-hero-max-price');
+const rowHeroMaxTries = document.getElementById('row-hero-max-tries');
+const inputHeroMaxTries = document.getElementById('input-hero-max-tries');
+const rowHeroTimeout = document.getElementById('row-hero-timeout');
+const inputHeroTimeout = document.getElementById('input-hero-timeout');
+const rowFivesimKey = document.getElementById('row-fivesim-key');
+const inputFivesimKey = document.getElementById('input-fivesim-key');
+const rowFivesimService = document.getElementById('row-fivesim-service');
+const inputFivesimService = document.getElementById('input-fivesim-service');
+const rowFivesimCountry = document.getElementById('row-fivesim-country');
+const inputFivesimCountry = document.getElementById('input-fivesim-country');
+const rowFivesimMaxPrice = document.getElementById('row-fivesim-max-price');
+const inputFivesimMaxPrice = document.getElementById('input-fivesim-max-price');
+const rowFivesimMaxTries = document.getElementById('row-fivesim-max-tries');
+const inputFivesimMaxTries = document.getElementById('input-fivesim-max-tries');
+const rowFivesimTimeout = document.getElementById('row-fivesim-timeout');
+const inputFivesimTimeout = document.getElementById('input-fivesim-timeout');
 const inputRunCount = document.getElementById('input-run-count');
 const DEFAULT_VPS_URL = 'https://ddv.667410.xyz/manage/auth-files';
 const DEFAULT_VPS_TYPE = 'codeProxy';
-const DEFAULT_MAIL_PROVIDER = 'qq';
+const DEFAULT_MAIL_PROVIDER = 'freemail';
+const DEFAULT_SMS_PROVIDER = 'fivesim';
+const DEFAULT_FREEMAIL_API_URL = 'https://mailfree.zhangbaba520.workers.dev/';
+const DEFAULT_FREEMAIL_DOMAIN = 'mail4.667410.xyz,mail5.667410.xyz,mail6.667410.xyz,mail7.667410.xyz,mail8.667410.xyz,mail9.667410.xyz,mail10.667410.xyz,mail11.667410.xyz,mail12.667410.xyz,baidu.667410.xyz,163.667410.xyz,gmail.667410.xyz,qq.667410.xyz,openai.667410.xyz,runtime.667410.xyz,edu.667410.xyz,google.667410.xyz,apple.667410.xyz,codex.667410.xyz';
+const DEFAULT_SMSBOWER_MAX_PRICE = 0.08;
+const DEFAULT_HERO_MAX_PRICE = 0.08;
+const DEFAULT_FIVESIM_MAX_PRICE = 50;
 
 // ============================================================
 // Toast Notifications
@@ -97,6 +144,7 @@ async function restoreState() {
     inputVpsUrl.value = state.vpsUrl || DEFAULT_VPS_URL;
     selectVpsType.value = state.vpsType || DEFAULT_VPS_TYPE;
     selectMailProvider.value = state.mailProvider || DEFAULT_MAIL_PROVIDER;
+    selectSmsProvider.value = state.smsProvider || DEFAULT_SMS_PROVIDER;
     if (state.inbucketHost) {
       inputInbucketHost.value = state.inbucketHost;
     }
@@ -105,13 +153,49 @@ async function restoreState() {
     }
     if (state.freemailApiUrl) {
       inputFreemailApiUrl.value = state.freemailApiUrl;
+    } else {
+      inputFreemailApiUrl.value = DEFAULT_FREEMAIL_API_URL;
     }
     if (state.freemailJwtToken) {
       inputFreemailJwtToken.value = state.freemailJwtToken;
     }
     if (state.freemailDomain) {
       inputFreemailDomain.value = state.freemailDomain;
+    } else {
+      inputFreemailDomain.value = DEFAULT_FREEMAIL_DOMAIN;
     }
+    if (state.smsbowerApiKey) inputSmsbowerKey.value = state.smsbowerApiKey;
+    if (state.smsbowerBaseUrl) inputSmsbowerBaseUrl.value = state.smsbowerBaseUrl;
+    if (state.smsbowerService) inputSmsbowerService.value = state.smsbowerService;
+    if (state.smsbowerCountry !== undefined) inputSmsbowerCountry.value = state.smsbowerCountry;
+    if (state.smsbowerMaxPrice !== undefined) {
+      inputSmsbowerMaxPrice.value = state.smsbowerMaxPrice;
+    } else {
+      inputSmsbowerMaxPrice.value = DEFAULT_SMSBOWER_MAX_PRICE;
+    }
+    if (state.smsbowerMaxTries !== undefined) inputSmsbowerMaxTries.value = state.smsbowerMaxTries;
+    if (state.smsbowerPollTimeoutSec !== undefined) inputSmsbowerTimeout.value = state.smsbowerPollTimeoutSec;
+    if (state.heroApiKey) inputHeroKey.value = state.heroApiKey;
+    if (state.heroBaseUrl) inputHeroBaseUrl.value = state.heroBaseUrl;
+    if (state.heroService) inputHeroService.value = state.heroService;
+    if (state.heroCountry !== undefined) inputHeroCountry.value = state.heroCountry;
+    if (state.heroMaxPrice !== undefined) {
+      inputHeroMaxPrice.value = state.heroMaxPrice;
+    } else {
+      inputHeroMaxPrice.value = DEFAULT_HERO_MAX_PRICE;
+    }
+    if (state.heroMaxTries !== undefined) inputHeroMaxTries.value = state.heroMaxTries;
+    if (state.heroPollTimeoutSec !== undefined) inputHeroTimeout.value = state.heroPollTimeoutSec;
+    if (state.fivesimApiKey) inputFivesimKey.value = state.fivesimApiKey;
+    if (state.fivesimService) inputFivesimService.value = state.fivesimService;
+    if (state.fivesimCountry) inputFivesimCountry.value = state.fivesimCountry;
+    if (state.fivesimMaxPrice !== undefined) {
+      inputFivesimMaxPrice.value = state.fivesimMaxPrice;
+    } else {
+      inputFivesimMaxPrice.value = DEFAULT_FIVESIM_MAX_PRICE;
+    }
+    if (state.fivesimMaxTries !== undefined) inputFivesimMaxTries.value = state.fivesimMaxTries;
+    if (state.fivesimPollTimeoutSec !== undefined) inputFivesimTimeout.value = state.fivesimPollTimeoutSec;
 
     if (state.stepStatuses) {
       for (const [step, status] of Object.entries(state.stepStatuses)) {
@@ -128,6 +212,7 @@ async function restoreState() {
     updateStatusDisplay(state);
     updateProgressCounter();
     updateMailProviderUI();
+    updateSmsProviderUI();
   } catch (err) {
     console.error('Failed to restore state:', err);
   }
@@ -145,6 +230,36 @@ function updateMailProviderUI() {
   rowFreemailApiUrl.style.display = useFreemail ? '' : 'none';
   rowFreemailJwtToken.style.display = useFreemail ? '' : 'none';
   rowFreemailDomain.style.display = useFreemail ? '' : 'none';
+}
+
+function updateSmsProviderUI() {
+  const provider = selectSmsProvider.value || DEFAULT_SMS_PROVIDER;
+  const showSmsbower = provider === 'smsbower' || provider === 'auto';
+  const showHero = provider === 'hero' || provider === 'auto';
+  const showFivesim = provider === 'fivesim' || provider === 'auto';
+
+  rowSmsbowerKey.style.display = showSmsbower ? '' : 'none';
+  rowSmsbowerBaseUrl.style.display = showSmsbower ? '' : 'none';
+  rowSmsbowerService.style.display = showSmsbower ? '' : 'none';
+  rowSmsbowerCountry.style.display = showSmsbower ? '' : 'none';
+  rowSmsbowerMaxPrice.style.display = showSmsbower ? '' : 'none';
+  rowSmsbowerMaxTries.style.display = showSmsbower ? '' : 'none';
+  rowSmsbowerTimeout.style.display = showSmsbower ? '' : 'none';
+
+  rowHeroKey.style.display = showHero ? '' : 'none';
+  rowHeroBaseUrl.style.display = showHero ? '' : 'none';
+  rowHeroService.style.display = showHero ? '' : 'none';
+  rowHeroCountry.style.display = showHero ? '' : 'none';
+  rowHeroMaxPrice.style.display = showHero ? '' : 'none';
+  rowHeroMaxTries.style.display = showHero ? '' : 'none';
+  rowHeroTimeout.style.display = showHero ? '' : 'none';
+
+  rowFivesimKey.style.display = showFivesim ? '' : 'none';
+  rowFivesimService.style.display = showFivesim ? '' : 'none';
+  rowFivesimCountry.style.display = showFivesim ? '' : 'none';
+  rowFivesimMaxPrice.style.display = showFivesim ? '' : 'none';
+  rowFivesimMaxTries.style.display = showFivesim ? '' : 'none';
+  rowFivesimTimeout.style.display = showFivesim ? '' : 'none';
 }
 
 // ============================================================
@@ -276,7 +391,7 @@ function escapeHtml(text) {
 }
 
 async function fetchProviderEmail() {
-  const defaultLabel = 'Auto';
+  const defaultLabel = '自动';
   btnFetchEmail.disabled = true;
   btnFetchEmail.textContent = '...';
   const provider = selectMailProvider.value;
@@ -292,14 +407,14 @@ async function fetchProviderEmail() {
       throw new Error(response.error);
     }
     if (!response?.email) {
-      throw new Error('Duck email was not returned.');
+      throw new Error('未获取到邮箱地址。');
     }
 
     inputEmail.value = response.email;
-    showToast(`Fetched ${response.email}`, 'success', 2500);
+    showToast(`已获取邮箱：${response.email}`, 'success', 2500);
     return response.email;
   } catch (err) {
-    showToast(`Auto fetch failed: ${err.message}`, 'error');
+    showToast(`自动获取失败：${err.message}`, 'error');
     throw err;
   } finally {
     btnFetchEmail.disabled = false;
@@ -308,7 +423,7 @@ async function fetchProviderEmail() {
 }
 
 function syncPasswordToggleLabel() {
-  btnTogglePassword.textContent = inputPassword.type === 'password' ? 'Show' : 'Hide';
+  btnTogglePassword.textContent = inputPassword.type === 'password' ? '显示' : '隐藏';
 }
 
 // ============================================================
@@ -321,7 +436,7 @@ document.querySelectorAll('.step-btn').forEach(btn => {
     if (step === 3) {
       const email = inputEmail.value.trim();
       if (!email) {
-        showToast('Please paste email address or use Auto first', 'warn');
+        showToast('请先粘贴邮箱，或点击“自动”获取', 'warn');
         return;
       }
       await chrome.runtime.sendMessage({ type: 'EXECUTE_STEP', source: 'sidepanel', payload: { step, email } });
@@ -343,7 +458,7 @@ btnTogglePassword.addEventListener('click', () => {
 btnStop.addEventListener('click', async () => {
   btnStop.disabled = true;
   await chrome.runtime.sendMessage({ type: 'STOP_FLOW', source: 'sidepanel', payload: {} });
-  showToast('Stopping current flow...', 'warn', 2000);
+  showToast('正在停止当前流程...', 'warn', 2000);
 });
 
 // Auto Run
@@ -358,7 +473,7 @@ btnAutoRun.addEventListener('click', async () => {
 btnAutoContinue.addEventListener('click', async () => {
   const email = inputEmail.value.trim();
   if (!email) {
-    showToast('Please fetch or paste email first!', 'warn');
+    showToast('请先自动获取或手动粘贴邮箱', 'warn');
     return;
   }
   autoContinueBar.style.display = 'none';
@@ -433,6 +548,15 @@ selectMailProvider.addEventListener('change', async () => {
   });
 });
 
+selectSmsProvider.addEventListener('change', async () => {
+  updateSmsProviderUI();
+  await chrome.runtime.sendMessage({
+    type: 'SAVE_SETTING',
+    source: 'sidepanel',
+    payload: { smsProvider: selectSmsProvider.value },
+  });
+});
+
 inputInbucketMailbox.addEventListener('change', async () => {
   await chrome.runtime.sendMessage({
     type: 'SAVE_SETTING',
@@ -470,6 +594,166 @@ inputFreemailDomain.addEventListener('change', async () => {
     type: 'SAVE_SETTING',
     source: 'sidepanel',
     payload: { freemailDomain: inputFreemailDomain.value.trim() },
+  });
+});
+
+inputSmsbowerKey.addEventListener('change', async () => {
+  await chrome.runtime.sendMessage({
+    type: 'SAVE_SETTING',
+    source: 'sidepanel',
+    payload: { smsbowerApiKey: inputSmsbowerKey.value.trim() },
+  });
+});
+
+inputSmsbowerBaseUrl.addEventListener('change', async () => {
+  await chrome.runtime.sendMessage({
+    type: 'SAVE_SETTING',
+    source: 'sidepanel',
+    payload: { smsbowerBaseUrl: inputSmsbowerBaseUrl.value.trim() },
+  });
+});
+
+inputSmsbowerService.addEventListener('change', async () => {
+  await chrome.runtime.sendMessage({
+    type: 'SAVE_SETTING',
+    source: 'sidepanel',
+    payload: { smsbowerService: inputSmsbowerService.value.trim() },
+  });
+});
+
+inputSmsbowerCountry.addEventListener('change', async () => {
+  await chrome.runtime.sendMessage({
+    type: 'SAVE_SETTING',
+    source: 'sidepanel',
+    payload: { smsbowerCountry: inputSmsbowerCountry.value.trim() },
+  });
+});
+
+inputSmsbowerMaxPrice.addEventListener('change', async () => {
+  await chrome.runtime.sendMessage({
+    type: 'SAVE_SETTING',
+    source: 'sidepanel',
+    payload: { smsbowerMaxPrice: inputSmsbowerMaxPrice.value.trim() },
+  });
+});
+
+inputSmsbowerMaxTries.addEventListener('change', async () => {
+  await chrome.runtime.sendMessage({
+    type: 'SAVE_SETTING',
+    source: 'sidepanel',
+    payload: { smsbowerMaxTries: inputSmsbowerMaxTries.value.trim() },
+  });
+});
+
+inputSmsbowerTimeout.addEventListener('change', async () => {
+  await chrome.runtime.sendMessage({
+    type: 'SAVE_SETTING',
+    source: 'sidepanel',
+    payload: { smsbowerPollTimeoutSec: inputSmsbowerTimeout.value.trim() },
+  });
+});
+
+inputHeroKey.addEventListener('change', async () => {
+  await chrome.runtime.sendMessage({
+    type: 'SAVE_SETTING',
+    source: 'sidepanel',
+    payload: { heroApiKey: inputHeroKey.value.trim() },
+  });
+});
+
+inputHeroBaseUrl.addEventListener('change', async () => {
+  await chrome.runtime.sendMessage({
+    type: 'SAVE_SETTING',
+    source: 'sidepanel',
+    payload: { heroBaseUrl: inputHeroBaseUrl.value.trim() },
+  });
+});
+
+inputHeroService.addEventListener('change', async () => {
+  await chrome.runtime.sendMessage({
+    type: 'SAVE_SETTING',
+    source: 'sidepanel',
+    payload: { heroService: inputHeroService.value.trim() },
+  });
+});
+
+inputHeroCountry.addEventListener('change', async () => {
+  await chrome.runtime.sendMessage({
+    type: 'SAVE_SETTING',
+    source: 'sidepanel',
+    payload: { heroCountry: inputHeroCountry.value.trim() },
+  });
+});
+
+inputHeroMaxPrice.addEventListener('change', async () => {
+  await chrome.runtime.sendMessage({
+    type: 'SAVE_SETTING',
+    source: 'sidepanel',
+    payload: { heroMaxPrice: inputHeroMaxPrice.value.trim() },
+  });
+});
+
+inputHeroMaxTries.addEventListener('change', async () => {
+  await chrome.runtime.sendMessage({
+    type: 'SAVE_SETTING',
+    source: 'sidepanel',
+    payload: { heroMaxTries: inputHeroMaxTries.value.trim() },
+  });
+});
+
+inputHeroTimeout.addEventListener('change', async () => {
+  await chrome.runtime.sendMessage({
+    type: 'SAVE_SETTING',
+    source: 'sidepanel',
+    payload: { heroPollTimeoutSec: inputHeroTimeout.value.trim() },
+  });
+});
+
+inputFivesimKey.addEventListener('change', async () => {
+  await chrome.runtime.sendMessage({
+    type: 'SAVE_SETTING',
+    source: 'sidepanel',
+    payload: { fivesimApiKey: inputFivesimKey.value.trim() },
+  });
+});
+
+inputFivesimService.addEventListener('change', async () => {
+  await chrome.runtime.sendMessage({
+    type: 'SAVE_SETTING',
+    source: 'sidepanel',
+    payload: { fivesimService: inputFivesimService.value.trim() },
+  });
+});
+
+inputFivesimCountry.addEventListener('change', async () => {
+  await chrome.runtime.sendMessage({
+    type: 'SAVE_SETTING',
+    source: 'sidepanel',
+    payload: { fivesimCountry: inputFivesimCountry.value.trim() },
+  });
+});
+
+inputFivesimMaxPrice.addEventListener('change', async () => {
+  await chrome.runtime.sendMessage({
+    type: 'SAVE_SETTING',
+    source: 'sidepanel',
+    payload: { fivesimMaxPrice: inputFivesimMaxPrice.value.trim() },
+  });
+});
+
+inputFivesimMaxTries.addEventListener('change', async () => {
+  await chrome.runtime.sendMessage({
+    type: 'SAVE_SETTING',
+    source: 'sidepanel',
+    payload: { fivesimMaxTries: inputFivesimMaxTries.value.trim() },
+  });
+});
+
+inputFivesimTimeout.addEventListener('change', async () => {
+  await chrome.runtime.sendMessage({
+    type: 'SAVE_SETTING',
+    source: 'sidepanel',
+    payload: { fivesimPollTimeoutSec: inputFivesimTimeout.value.trim() },
   });
 });
 
