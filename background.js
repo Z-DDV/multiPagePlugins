@@ -20,9 +20,17 @@ const SMS_PROVIDER_AUTO = 'auto';
 const SMS_PROVIDER_SMSBOWER = 'smsbower';
 const SMS_PROVIDER_HERO = 'hero';
 const SMS_PROVIDER_FIVESIM = 'fivesim';
+const FIVESIM_MODE_ACTIVATION = 'activation';
+const FIVESIM_MODE_HOSTING = 'hosting';
 const SMS_PROVIDER_FALLBACK_ORDER = [SMS_PROVIDER_SMSBOWER, SMS_PROVIDER_HERO, SMS_PROVIDER_FIVESIM];
 const SMSBOWER_DEFAULT_BASE_URL = 'https://smsbower.page/stubs/handler_api.php';
 const HERO_DEFAULT_BASE_URL = 'https://hero-sms.com/stubs/handler_api.php';
+const FIVESIM_DEFAULT_BASE_URL = 'https://5sim.net/v1';
+const LUCKMAIL_DEFAULT_BASE_URL = 'https://mails.luckyous.com';
+const LUCKMAIL_DEFAULT_PROJECT_CODE = 'OpenAi';
+const LUCKMAIL_DEFAULT_SUCCESS_TAG = 'used free';
+const LUCKMAIL_DEFAULT_POLL_TIMEOUT_SEC = 180;
+const LUCKMAIL_DEFAULT_POLL_INTERVAL_MS = 3000;
 const VERIFICATION_POLL_SETTINGS = {
   maxAttempts: 45,
   intervalMs: 5000,
@@ -113,6 +121,15 @@ const DEFAULT_STATE = {
   freemailApiUrl: 'https://mailfree.zhangbaba520.workers.dev/',
   freemailJwtToken: '',
   freemailDomain: 'mail4.667410.xyz,mail5.667410.xyz,mail6.667410.xyz,mail7.667410.xyz,mail8.667410.xyz,mail9.667410.xyz,mail10.667410.xyz,mail11.667410.xyz,mail12.667410.xyz,baidu.667410.xyz,163.667410.xyz,gmail.667410.xyz,qq.667410.xyz,openai.667410.xyz,runtime.667410.xyz,edu.667410.xyz,google.667410.xyz,apple.667410.xyz,codex.667410.xyz',
+  luckmailBaseUrl: LUCKMAIL_DEFAULT_BASE_URL,
+  luckmailApiKey: '',
+  luckmailProjectCode: LUCKMAIL_DEFAULT_PROJECT_CODE,
+  luckmailEmailType: '',
+  luckmailDomain: '',
+  luckmailSuccessTag: LUCKMAIL_DEFAULT_SUCCESS_TAG,
+  luckmailPollTimeoutSec: LUCKMAIL_DEFAULT_POLL_TIMEOUT_SEC,
+  luckmailPollIntervalMs: LUCKMAIL_DEFAULT_POLL_INTERVAL_MS,
+  luckmailOrderNo: '',
   smsProvider: SMS_PROVIDER_FIVESIM,
   smsbowerApiKey: '',
   smsbowerBaseUrl: SMSBOWER_DEFAULT_BASE_URL,
@@ -129,6 +146,8 @@ const DEFAULT_STATE = {
   heroMaxTries: 3,
   heroPollTimeoutSec: 120,
   fivesimApiKey: '',
+  fivesimBaseUrl: FIVESIM_DEFAULT_BASE_URL,
+  fivesimMode: FIVESIM_MODE_ACTIVATION,
   fivesimService: 'openai',
   fivesimCountry: 'vietnam',
   fivesimMaxPrice: 0.15,
@@ -186,9 +205,65 @@ function normalizeBaseUrl(value, fallback) {
   return raw || fallback;
 }
 
+function normalizeFiveSimMode(value, fallback = FIVESIM_MODE_ACTIVATION) {
+  const mode = String(value || '').trim().toLowerCase();
+  if (mode === FIVESIM_MODE_ACTIVATION || mode === FIVESIM_MODE_HOSTING) {
+    return mode;
+  }
+  return fallback;
+}
+
+function normalizeFiveSimCountry(value, fallback = DEFAULT_STATE?.fivesimCountry || 'vietnam') {
+  const raw = String(value || '').trim().toLowerCase();
+  if (!raw) return String(fallback || 'vietnam').trim().toLowerCase();
+  return raw.replace(/\s+/g, '');
+}
+
+function normalizeFiveSimService(value, fallback = 'openai') {
+  const raw = String(value || '').trim().toLowerCase();
+  if (!raw) return String(fallback || 'openai').trim().toLowerCase();
+  return raw.replace(/\s+/g, '');
+}
+
+function normalizeFiveSimBaseUrl(value, fallback = FIVESIM_DEFAULT_BASE_URL) {
+  const raw = String(value || '').trim();
+  if (!raw) return fallback;
+
+  let candidate = raw;
+  if (!/^[a-zA-Z][a-zA-Z\d+\-.]*:\/\//.test(candidate)) {
+    candidate = `https://${candidate}`;
+  }
+
+  try {
+    const parsed = new URL(candidate);
+    const pathname = parsed.pathname.replace(/\/+$/, '');
+    if (!pathname || pathname === '/') {
+      parsed.pathname = '/v1';
+    } else if (!pathname.endsWith('/v1')) {
+      parsed.pathname = `${pathname}/v1`;
+    } else {
+      parsed.pathname = pathname;
+    }
+    parsed.search = '';
+    parsed.hash = '';
+    return parsed.toString().replace(/\/+$/, '');
+  } catch {
+    return fallback;
+  }
+}
+
 function applySmsStateDefaults(state) {
   return {
     ...state,
+    luckmailBaseUrl: String(state.luckmailBaseUrl || LUCKMAIL_DEFAULT_BASE_URL).trim() || LUCKMAIL_DEFAULT_BASE_URL,
+    luckmailApiKey: String(state.luckmailApiKey || '').trim(),
+    luckmailProjectCode: String(state.luckmailProjectCode || LUCKMAIL_DEFAULT_PROJECT_CODE).trim() || LUCKMAIL_DEFAULT_PROJECT_CODE,
+    luckmailEmailType: String(state.luckmailEmailType || '').trim(),
+    luckmailDomain: String(state.luckmailDomain || '').trim(),
+    luckmailSuccessTag: String(state.luckmailSuccessTag || LUCKMAIL_DEFAULT_SUCCESS_TAG).trim() || LUCKMAIL_DEFAULT_SUCCESS_TAG,
+    luckmailPollTimeoutSec: toPositiveInteger(state.luckmailPollTimeoutSec, LUCKMAIL_DEFAULT_POLL_TIMEOUT_SEC),
+    luckmailPollIntervalMs: toPositiveInteger(state.luckmailPollIntervalMs, LUCKMAIL_DEFAULT_POLL_INTERVAL_MS),
+    luckmailOrderNo: String(state.luckmailOrderNo || '').trim(),
     smsProvider: normalizeSmsProvider(state.smsProvider, DEFAULT_STATE.smsProvider),
     smsbowerApiKey: String(state.smsbowerApiKey || '').trim(),
     smsbowerBaseUrl: normalizeBaseUrl(state.smsbowerBaseUrl, SMSBOWER_DEFAULT_BASE_URL),
@@ -205,8 +280,10 @@ function applySmsStateDefaults(state) {
     heroMaxTries: toPositiveInteger(state.heroMaxTries, 3),
     heroPollTimeoutSec: toPositiveInteger(state.heroPollTimeoutSec, 120),
     fivesimApiKey: String(state.fivesimApiKey || '').trim(),
-    fivesimService: String(state.fivesimService || 'openai').trim() || 'openai',
-    fivesimCountry: String(state.fivesimCountry || DEFAULT_STATE.fivesimCountry).trim() || DEFAULT_STATE.fivesimCountry,
+    fivesimBaseUrl: normalizeFiveSimBaseUrl(state.fivesimBaseUrl, FIVESIM_DEFAULT_BASE_URL),
+    fivesimMode: normalizeFiveSimMode(state.fivesimMode, FIVESIM_MODE_ACTIVATION),
+    fivesimService: normalizeFiveSimService(state.fivesimService, 'openai'),
+    fivesimCountry: normalizeFiveSimCountry(state.fivesimCountry, DEFAULT_STATE.fivesimCountry),
     fivesimMaxPrice: toNonNegativeNumber(state.fivesimMaxPrice, DEFAULT_STATE.fivesimMaxPrice),
     fivesimMaxTries: toPositiveInteger(state.fivesimMaxTries, 3),
     fivesimPollTimeoutSec: toPositiveInteger(state.fivesimPollTimeoutSec, 180),
@@ -276,6 +353,14 @@ async function resetState() {
     'freemailApiUrl',
     'freemailJwtToken',
     'freemailDomain',
+    'luckmailBaseUrl',
+    'luckmailApiKey',
+    'luckmailProjectCode',
+    'luckmailEmailType',
+    'luckmailDomain',
+    'luckmailSuccessTag',
+    'luckmailPollTimeoutSec',
+    'luckmailPollIntervalMs',
     'smsProvider',
     'smsbowerApiKey',
     'smsbowerBaseUrl',
@@ -292,6 +377,8 @@ async function resetState() {
     'heroMaxTries',
     'heroPollTimeoutSec',
     'fivesimApiKey',
+    'fivesimBaseUrl',
+    'fivesimMode',
     'fivesimService',
     'fivesimCountry',
     'fivesimMaxPrice',
@@ -314,6 +401,14 @@ async function resetState() {
     freemailApiUrl: prev.freemailApiUrl || DEFAULT_STATE.freemailApiUrl,
     freemailJwtToken: prev.freemailJwtToken || '',
     freemailDomain: prev.freemailDomain || DEFAULT_STATE.freemailDomain,
+    luckmailBaseUrl: prev.luckmailBaseUrl || DEFAULT_STATE.luckmailBaseUrl,
+    luckmailApiKey: String(prev.luckmailApiKey || '').trim(),
+    luckmailProjectCode: String(prev.luckmailProjectCode || DEFAULT_STATE.luckmailProjectCode).trim() || DEFAULT_STATE.luckmailProjectCode,
+    luckmailEmailType: String(prev.luckmailEmailType || '').trim(),
+    luckmailDomain: String(prev.luckmailDomain || '').trim(),
+    luckmailSuccessTag: String(prev.luckmailSuccessTag || DEFAULT_STATE.luckmailSuccessTag).trim() || DEFAULT_STATE.luckmailSuccessTag,
+    luckmailPollTimeoutSec: toPositiveInteger(prev.luckmailPollTimeoutSec, DEFAULT_STATE.luckmailPollTimeoutSec),
+    luckmailPollIntervalMs: toPositiveInteger(prev.luckmailPollIntervalMs, DEFAULT_STATE.luckmailPollIntervalMs),
     smsProvider: normalizeSmsProvider(prev.smsProvider, DEFAULT_STATE.smsProvider),
     smsbowerApiKey: String(prev.smsbowerApiKey || '').trim(),
     smsbowerBaseUrl: normalizeBaseUrl(prev.smsbowerBaseUrl, SMSBOWER_DEFAULT_BASE_URL),
@@ -330,8 +425,10 @@ async function resetState() {
     heroMaxTries: toPositiveInteger(prev.heroMaxTries, 3),
     heroPollTimeoutSec: toPositiveInteger(prev.heroPollTimeoutSec, 120),
     fivesimApiKey: String(prev.fivesimApiKey || '').trim(),
-    fivesimService: String(prev.fivesimService || 'openai').trim() || 'openai',
-    fivesimCountry: String(prev.fivesimCountry || DEFAULT_STATE.fivesimCountry).trim() || DEFAULT_STATE.fivesimCountry,
+    fivesimBaseUrl: normalizeFiveSimBaseUrl(prev.fivesimBaseUrl, FIVESIM_DEFAULT_BASE_URL),
+    fivesimMode: normalizeFiveSimMode(prev.fivesimMode, FIVESIM_MODE_ACTIVATION),
+    fivesimService: normalizeFiveSimService(prev.fivesimService, 'openai'),
+    fivesimCountry: normalizeFiveSimCountry(prev.fivesimCountry, DEFAULT_STATE.fivesimCountry),
     fivesimMaxPrice: toNonNegativeNumber(prev.fivesimMaxPrice, DEFAULT_STATE.fivesimMaxPrice),
     fivesimMaxTries: toPositiveInteger(prev.fivesimMaxTries, 3),
     fivesimPollTimeoutSec: toPositiveInteger(prev.fivesimPollTimeoutSec, 180),
@@ -1158,6 +1255,14 @@ async function handleMessage(message, sender) {
       if (message.payload.freemailApiUrl !== undefined) updates.freemailApiUrl = message.payload.freemailApiUrl;
       if (message.payload.freemailJwtToken !== undefined) updates.freemailJwtToken = message.payload.freemailJwtToken;
       if (message.payload.freemailDomain !== undefined) updates.freemailDomain = message.payload.freemailDomain;
+      if (message.payload.luckmailBaseUrl !== undefined) updates.luckmailBaseUrl = String(message.payload.luckmailBaseUrl || '').trim() || DEFAULT_STATE.luckmailBaseUrl;
+      if (message.payload.luckmailApiKey !== undefined) updates.luckmailApiKey = String(message.payload.luckmailApiKey || '').trim();
+      if (message.payload.luckmailProjectCode !== undefined) updates.luckmailProjectCode = String(message.payload.luckmailProjectCode || '').trim() || DEFAULT_STATE.luckmailProjectCode;
+      if (message.payload.luckmailEmailType !== undefined) updates.luckmailEmailType = String(message.payload.luckmailEmailType || '').trim();
+      if (message.payload.luckmailDomain !== undefined) updates.luckmailDomain = String(message.payload.luckmailDomain || '').trim();
+      if (message.payload.luckmailSuccessTag !== undefined) updates.luckmailSuccessTag = String(message.payload.luckmailSuccessTag || '').trim() || DEFAULT_STATE.luckmailSuccessTag;
+      if (message.payload.luckmailPollTimeoutSec !== undefined) updates.luckmailPollTimeoutSec = toPositiveInteger(message.payload.luckmailPollTimeoutSec, DEFAULT_STATE.luckmailPollTimeoutSec);
+      if (message.payload.luckmailPollIntervalMs !== undefined) updates.luckmailPollIntervalMs = toPositiveInteger(message.payload.luckmailPollIntervalMs, DEFAULT_STATE.luckmailPollIntervalMs);
       if (message.payload.smsProvider !== undefined) updates.smsProvider = normalizeSmsProvider(message.payload.smsProvider);
       if (message.payload.smsbowerApiKey !== undefined) updates.smsbowerApiKey = String(message.payload.smsbowerApiKey || '').trim();
       if (message.payload.smsbowerBaseUrl !== undefined) updates.smsbowerBaseUrl = normalizeBaseUrl(message.payload.smsbowerBaseUrl, SMSBOWER_DEFAULT_BASE_URL);
@@ -1174,8 +1279,10 @@ async function handleMessage(message, sender) {
       if (message.payload.heroMaxTries !== undefined) updates.heroMaxTries = toPositiveInteger(message.payload.heroMaxTries, 3);
       if (message.payload.heroPollTimeoutSec !== undefined) updates.heroPollTimeoutSec = toPositiveInteger(message.payload.heroPollTimeoutSec, 120);
       if (message.payload.fivesimApiKey !== undefined) updates.fivesimApiKey = String(message.payload.fivesimApiKey || '').trim();
-      if (message.payload.fivesimService !== undefined) updates.fivesimService = String(message.payload.fivesimService || '').trim() || 'openai';
-      if (message.payload.fivesimCountry !== undefined) updates.fivesimCountry = String(message.payload.fivesimCountry || '').trim() || DEFAULT_STATE.fivesimCountry;
+      if (message.payload.fivesimBaseUrl !== undefined) updates.fivesimBaseUrl = normalizeFiveSimBaseUrl(message.payload.fivesimBaseUrl, FIVESIM_DEFAULT_BASE_URL);
+      if (message.payload.fivesimMode !== undefined) updates.fivesimMode = normalizeFiveSimMode(message.payload.fivesimMode, FIVESIM_MODE_ACTIVATION);
+      if (message.payload.fivesimService !== undefined) updates.fivesimService = normalizeFiveSimService(message.payload.fivesimService, 'openai');
+      if (message.payload.fivesimCountry !== undefined) updates.fivesimCountry = normalizeFiveSimCountry(message.payload.fivesimCountry, DEFAULT_STATE.fivesimCountry);
       if (message.payload.fivesimMaxPrice !== undefined) updates.fivesimMaxPrice = toNonNegativeNumber(message.payload.fivesimMaxPrice, DEFAULT_STATE.fivesimMaxPrice);
       if (message.payload.fivesimMaxTries !== undefined) updates.fivesimMaxTries = toPositiveInteger(message.payload.fivesimMaxTries, 3);
       if (message.payload.fivesimPollTimeoutSec !== undefined) updates.fivesimPollTimeoutSec = toPositiveInteger(message.payload.fivesimPollTimeoutSec, 180);
@@ -1550,6 +1657,99 @@ function normalizeFreemailApiUrl(rawValue) {
   }
 }
 
+function normalizeLuckmailBaseUrl(rawValue) {
+  const value = (rawValue || '').trim();
+  if (!value) return '';
+  const candidate = /^[a-zA-Z][a-zA-Z\d+\-.]*:\/\//.test(value) ? value : `https://${value}`;
+  try {
+    const parsed = new URL(candidate);
+    let normalizedPath = parsed.pathname.replace(/\/+$/, '');
+    normalizedPath = normalizedPath.replace(/\/api\/v1\/openapi$/i, '');
+    return `${parsed.origin}${normalizedPath}`;
+  } catch {
+    return '';
+  }
+}
+
+function toLuckmailOpenapiPath(path) {
+  const rawPath = String(path || '').trim();
+  if (!rawPath) {
+    return '/api/v1/openapi';
+  }
+  const normalized = rawPath.startsWith('/') ? rawPath : `/${rawPath}`;
+  if (normalized === '/api/v1/openapi' || normalized.startsWith('/api/v1/openapi/')) {
+    return normalized;
+  }
+  return `/api/v1/openapi${normalized}`;
+}
+
+function unwrapLuckmailPayload(payload) {
+  if (!payload || typeof payload !== 'object') return payload;
+  if (Object.prototype.hasOwnProperty.call(payload, 'code')) {
+    const code = Number(payload.code);
+    if (Number.isFinite(code) && code !== 0) {
+      throw new Error(String(payload.message || `Luckmail API code ${code}`));
+    }
+    return payload.data ?? {};
+  }
+  return payload;
+}
+
+async function fetchLuckmailJson(state, method, path, params = {}, body = null) {
+  const apiBase = normalizeLuckmailBaseUrl(state.luckmailBaseUrl);
+  if (!apiBase) {
+    throw new Error('Luckmail Base URL is empty or invalid.');
+  }
+  const apiKey = String(state.luckmailApiKey || '').trim();
+  if (!apiKey) {
+    throw new Error('Luckmail API Key is empty.');
+  }
+
+  const url = new URL(`${apiBase}${toLuckmailOpenapiPath(path)}`);
+  Object.entries(params || {}).forEach(([key, value]) => {
+    if (value !== undefined && value !== null && value !== '') {
+      url.searchParams.set(key, String(value));
+    }
+  });
+
+  const headers = {
+    Accept: 'application/json',
+    'X-API-Key': apiKey,
+  };
+  if (body != null) {
+    headers['Content-Type'] = 'application/json';
+  }
+
+  const response = await fetch(url.toString(), {
+    method,
+    headers,
+    body: body != null ? JSON.stringify(body) : undefined,
+  });
+
+  let payload = null;
+  let text = '';
+  try {
+    payload = await response.json();
+  } catch {
+    try {
+      text = await response.text();
+    } catch {
+      text = '';
+    }
+  }
+
+  if (!response.ok) {
+    const serverMsg = payload?.message || payload?.error || text || `HTTP ${response.status}`;
+    throw new Error(`Luckmail API request failed (${response.status}): ${serverMsg}`);
+  }
+
+  try {
+    return unwrapLuckmailPayload(payload);
+  } catch (err) {
+    throw new Error(`Luckmail API returned error: ${err.message}`);
+  }
+}
+
 function parseFreemailMessageTimestamp(message) {
   const candidates = [
     message?.timestamp,
@@ -1912,16 +2112,187 @@ async function pollFreemailVerificationCode(state, options = {}) {
   throw new Error(`Step ${step}: Freemail verification code not found in time.`);
 }
 
+async function fetchLuckmailEmail(state) {
+  const projectCode = String(state.luckmailProjectCode || LUCKMAIL_DEFAULT_PROJECT_CODE).trim() || LUCKMAIL_DEFAULT_PROJECT_CODE;
+  const emailType = String(state.luckmailEmailType || '').trim();
+  const domain = String(state.luckmailDomain || '').trim();
+
+  const requestBody = {
+    project_code: projectCode,
+  };
+  if (emailType) requestBody.email_type = emailType;
+  if (domain) requestBody.domain = domain;
+
+  const data = await fetchLuckmailJson(state, 'POST', '/order/create', {}, requestBody);
+  const orderNo = String(data?.order_no || data?.orderNo || '').trim();
+  const email = String(data?.email_address || data?.emailAddress || data?.email || '').trim();
+  if (!orderNo) {
+    throw new Error('Luckmail create order succeeded but no order_no returned.');
+  }
+  if (!email.includes('@')) {
+    throw new Error('Luckmail create order succeeded but no valid email returned.');
+  }
+
+  await setState({ luckmailOrderNo: orderNo });
+  await setEmailState(email);
+  await addLog(`Luckmail: created order ${orderNo}, mailbox ${email}`, 'ok');
+  return email;
+}
+
+async function cancelLuckmailOrder(state, orderNo, reason = '') {
+  const resolvedOrderNo = String(orderNo || '').trim();
+  if (!resolvedOrderNo) return;
+
+  try {
+    await fetchLuckmailJson(state, 'POST', `/order/${encodeURIComponent(resolvedOrderNo)}/cancel`);
+    await addLog(`Luckmail: canceled order ${resolvedOrderNo}${reason ? ` (${reason})` : ''}.`, 'warn');
+  } catch (err) {
+    await addLog(`Luckmail: failed to cancel order ${resolvedOrderNo}: ${err.message}`, 'warn');
+  }
+}
+
+async function tagLuckmailEmailAfterSuccess(state, email) {
+  const emailAddress = String(email || '').trim().toLowerCase();
+  if (!emailAddress) return false;
+
+  const tagName = String(state.luckmailSuccessTag || LUCKMAIL_DEFAULT_SUCCESS_TAG).trim();
+  if (!tagName) return false;
+
+  try {
+    const listData = await fetchLuckmailJson(state, 'GET', '/email/purchases', {
+      page: 1,
+      page_size: 50,
+      keyword: emailAddress,
+    });
+    const list = Array.isArray(listData?.list)
+      ? listData.list
+      : (Array.isArray(listData) ? listData : []);
+    const matched = list.find((item) => String(item?.email_address || '').trim().toLowerCase() === emailAddress);
+
+    if (!matched) {
+      await addLog(`Luckmail: no purchased record found for ${emailAddress}, skip tag "${tagName}".`, 'warn');
+      return false;
+    }
+
+    const purchaseId = matched.id ?? matched.purchase_id ?? matched.purchaseId;
+    if (purchaseId == null) {
+      await addLog(`Luckmail: purchased record for ${emailAddress} has no id, skip tag "${tagName}".`, 'warn');
+      return false;
+    }
+
+    await fetchLuckmailJson(
+      state,
+      'PUT',
+      `/email/purchases/${encodeURIComponent(String(purchaseId))}/tag`,
+      {},
+      { tag_name: tagName }
+    );
+    await addLog(`Luckmail: tagged ${emailAddress} as "${tagName}".`, 'ok');
+    return true;
+  } catch (err) {
+    await addLog(`Luckmail: failed to tag ${emailAddress} as "${tagName}": ${err.message}`, 'warn');
+    return false;
+  }
+}
+
+async function pollLuckmailVerificationCode(state, options = {}) {
+  const mailbox = String(state.email || '').trim();
+  const orderNo = String(state.luckmailOrderNo || '').trim();
+  if (!mailbox) {
+    throw new Error('Luckmail polling requires email address (Step 3).');
+  }
+  if (!orderNo) {
+    throw new Error('Luckmail polling requires order_no. Please use Luckmail auto-fetch in Step 3.');
+  }
+
+  const step = Number(options.step || 4);
+  const timeoutSec = Math.max(30, toPositiveInteger(state.luckmailPollTimeoutSec, LUCKMAIL_DEFAULT_POLL_TIMEOUT_SEC));
+  const intervalMs = Math.max(1000, toPositiveInteger(state.luckmailPollIntervalMs, LUCKMAIL_DEFAULT_POLL_INTERVAL_MS));
+  const maxAttempts = Math.max(1, Math.ceil((timeoutSec * 1000) / intervalMs));
+  const startedAt = Date.now();
+  let attempt = 1;
+
+  while (Date.now() - startedAt < timeoutSec * 1000) {
+    throwIfStopped();
+
+    const data = await fetchLuckmailJson(
+      state,
+      'GET',
+      `/order/${encodeURIComponent(orderNo)}/code`
+    );
+
+    const status = String(data?.status || '').toLowerCase();
+    if (status === 'success') {
+      let code = extractSixDigitCode(data?.verification_code || data?.code || '');
+      if (!code) {
+        code = extractSixDigitCode(data?.mail_subject || '');
+      }
+      if (!code) {
+        code = extractSixDigitCode(data?.mail_body_html || data?.mail_body || '');
+      }
+      if (!code) {
+        throw new Error(`Luckmail order ${orderNo} succeeded but verification code is missing.`);
+      }
+
+      return {
+        code,
+        emailTimestamp: Date.now(),
+        orderNo,
+      };
+    }
+
+    if (status === 'timeout') {
+      throw new Error(`Luckmail order ${orderNo} timed out.`);
+    }
+    if (status === 'cancelled' || status === 'canceled') {
+      throw new Error(`Luckmail order ${orderNo} was cancelled.`);
+    }
+
+    if (attempt === 1 || attempt % 3 === 0) {
+      await addLog(`Step ${step}: Luckmail polling ${attempt}/${maxAttempts}, status=${status || 'pending'}...`, 'info');
+    }
+
+    attempt += 1;
+    await sleepWithStop(intervalMs);
+  }
+
+  await cancelLuckmailOrder(state, orderNo, 'poll-timeout');
+  throw new Error(`Step ${step}: Luckmail verification code not found in time.`);
+}
+
 async function fetchEmailForProvider(provider, state, options = {}) {
   if (provider === 'freemail') {
     return fetchFreemailEmail(state);
+  }
+  if (provider === 'luckmail') {
+    return fetchLuckmailEmail(state);
   }
   return fetchDuckEmail(options);
 }
 
 async function fetchEmailForProviderWithRetries(provider, state, options = {}) {
   if (provider === 'freemail') {
-    return fetchFreemailEmail(state);
+    return fetchEmailForProvider(provider, state, options);
+  }
+
+  if (provider === 'luckmail') {
+    let lastError = null;
+    const maxAttempts = 3;
+    for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+      try {
+        if (attempt > 1) {
+          await addLog(`Luckmail: retrying order create (${attempt}/${maxAttempts})...`, 'info');
+        }
+        return await fetchLuckmailEmail(state);
+      } catch (err) {
+        lastError = err;
+        await addLog(`Luckmail order create attempt ${attempt}/${maxAttempts} failed: ${err.message}`, 'warn');
+        if (attempt < maxAttempts) {
+          await sleepWithStop(1500);
+        }
+      }
+    }
+    throw lastError || new Error('Luckmail create order failed.');
   }
 
   let lastError = null;
@@ -1941,6 +2312,24 @@ async function fetchEmailForProviderWithRetries(provider, state, options = {}) {
   }
 
   throw lastError || new Error('Duck Mail auto-fetch failed.');
+}
+
+function getMailProviderLabel(provider) {
+  if (provider === 'freemail') return 'Freemail';
+  if (provider === 'luckmail') return 'Luckmail';
+  if (provider === 'inbucket') return 'Inbucket';
+  if (provider === '163') return '163 Mail';
+  if (provider === 'qq') return 'QQ Mail';
+  return 'Duck Mail';
+}
+
+function getMailProviderResumeHint(provider) {
+  if (provider === 'freemail') return 'fetch Freemail email or paste manually';
+  if (provider === 'luckmail') return 'fetch Luckmail email or paste manually';
+  if (provider === 'inbucket') return 'fetch Inbucket email or paste manually';
+  if (provider === '163') return 'fetch 163 email or paste manually';
+  if (provider === 'qq') return 'fetch QQ email or paste manually';
+  return 'fetch Duck email or paste manually';
 }
 
 // ============================================================
@@ -1978,6 +2367,14 @@ async function autoRunLoop(totalRuns) {
       freemailApiUrl: prevState.freemailApiUrl,
       freemailJwtToken: prevState.freemailJwtToken,
       freemailDomain: prevState.freemailDomain,
+      luckmailBaseUrl: prevState.luckmailBaseUrl,
+      luckmailApiKey: prevState.luckmailApiKey,
+      luckmailProjectCode: prevState.luckmailProjectCode,
+      luckmailEmailType: prevState.luckmailEmailType,
+      luckmailDomain: prevState.luckmailDomain,
+      luckmailSuccessTag: prevState.luckmailSuccessTag,
+      luckmailPollTimeoutSec: prevState.luckmailPollTimeoutSec,
+      luckmailPollIntervalMs: prevState.luckmailPollIntervalMs,
       smsProvider: prevState.smsProvider,
       smsbowerApiKey: prevState.smsbowerApiKey,
       smsbowerBaseUrl: prevState.smsbowerBaseUrl,
@@ -1994,6 +2391,8 @@ async function autoRunLoop(totalRuns) {
       heroMaxTries: prevState.heroMaxTries,
       heroPollTimeoutSec: prevState.heroPollTimeoutSec,
       fivesimApiKey: prevState.fivesimApiKey,
+      fivesimBaseUrl: prevState.fivesimBaseUrl,
+      fivesimMode: prevState.fivesimMode,
       fivesimService: prevState.fivesimService,
       fivesimCountry: prevState.fivesimCountry,
       fivesimMaxPrice: prevState.fivesimMaxPrice,
@@ -2020,21 +2419,18 @@ async function autoRunLoop(totalRuns) {
 
       let emailReady = false;
       const provider = (prevState.mailProvider || DEFAULT_STATE.mailProvider).trim();
+      const providerLabel = getMailProviderLabel(provider);
       try {
         const currentState = await getState();
         const autoEmail = await fetchEmailForProviderWithRetries(provider, currentState, { generateNew: true });
-        const providerLabel = provider === 'freemail' ? 'Freemail' : 'Duck Mail';
         await addLog(`=== Run ${run}/${totalRuns} — ${providerLabel} email ready: ${autoEmail} ===`, 'ok');
         emailReady = true;
       } catch (err) {
-        const providerLabel = provider === 'freemail' ? 'Freemail' : 'Duck Mail';
         await addLog(`${providerLabel} auto-fetch failed: ${err.message}`, 'warn');
       }
 
       if (!emailReady) {
-        const providerHint = provider === 'freemail'
-          ? 'fetch Freemail email or paste manually'
-          : 'fetch Duck email or paste manually';
+        const providerHint = getMailProviderResumeHint(provider);
         await addLog(`=== Run ${run}/${totalRuns} PAUSED: ${providerHint}, then continue ===`, 'warn');
         chrome.runtime.sendMessage(status('waiting_email')).catch(() => {});
 
@@ -2162,9 +2558,10 @@ async function executeStep2(state) {
 async function executeStep3(state) {
   let email = String(state.email || '').trim();
   if (!email) {
-    if (state.mailProvider === 'freemail') {
-      await addLog('Step 3: No email provided, requesting one from Freemail...', 'info');
-      email = await fetchFreemailEmail(state);
+    if (state.mailProvider === 'freemail' || state.mailProvider === 'luckmail') {
+      const providerLabel = state.mailProvider === 'luckmail' ? 'Luckmail' : 'Freemail';
+      await addLog(`Step 3: No email provided, requesting one from ${providerLabel}...`, 'info');
+      email = await fetchEmailForProvider(state.mailProvider, state, { generateNew: true });
       state = { ...state, email };
     } else {
       throw new Error('No email address. Paste email in Side Panel first.');
@@ -2208,7 +2605,10 @@ function getMailConfig(state) {
     };
   }
   if (provider === 'freemail') {
-    return { source: 'freemail-api', label: 'Freemail API', apiDriven: true };
+    return { source: 'freemail-api', label: 'Freemail API', apiDriven: true, apiKind: 'freemail' };
+  }
+  if (provider === 'luckmail') {
+    return { source: 'luckmail-api', label: 'Luckmail API', apiDriven: true, apiKind: 'luckmail' };
   }
   if (provider === 'inbucket') {
     const host = normalizeInbucketOrigin(state.inbucketHost);
@@ -2309,6 +2709,11 @@ async function pollVerificationCode(step, state, options = {}) {
   const pollConfig = getVerificationPollConfig(step);
   if (mail.apiDriven) {
     await addLog(`Step ${step}: Using ${mail.label}${phaseLabel ? ` (${phaseLabel})` : ''}...`, 'info');
+    if (mail.apiKind === 'luckmail') {
+      return pollLuckmailVerificationCode(state, {
+        step,
+      });
+    }
     return pollFreemailVerificationCode(state, {
       step,
       filterAfterTimestamp,
@@ -2350,6 +2755,7 @@ async function fillVerificationCodeForStep(step, result) {
   if (!result?.code) return false;
 
   const pollConfig = getVerificationPollConfig(step);
+  const state = await getState();
   const stateUpdates = {};
   if (result.emailTimestamp) stateUpdates.lastEmailTimestamp = result.emailTimestamp;
   if (step === 4) stateUpdates.lastSignupCode = result.code;
@@ -2371,6 +2777,12 @@ async function fillVerificationCodeForStep(step, result) {
     source: 'background',
     payload: { code: result.code },
   });
+
+  if (step === 4 && state.mailProvider === 'luckmail') {
+    await tagLuckmailEmailAfterSuccess(state, state.email);
+    await setState({ luckmailOrderNo: '' });
+  }
+
   return true;
 }
 
@@ -2436,6 +2848,21 @@ async function clickResendOnSignupPage(step) {
 }
 
 async function executeStep4(state) {
+  if (state.mailProvider === 'luckmail') {
+    const orderNo = String(state.luckmailOrderNo || '').trim();
+    try {
+      const result = await pollVerificationCode(4, state, {
+        phaseLabel: 'luckmail order poll',
+      });
+      await fillVerificationCodeForStep(4, result);
+      return;
+    } catch (err) {
+      await cancelLuckmailOrder(state, orderNo, 'step4-failed');
+      await setState({ luckmailOrderNo: '' });
+      throw err;
+    }
+  }
+
   const stepStartTimestamp = Date.now();
   if (await pollVerificationCodeBeforeResend(4, state, { filterAfterTimestamp: stepStartTimestamp })) {
     return;
@@ -2486,6 +2913,18 @@ function parseJsonSafe(text) {
   }
 }
 
+function compactTextForLog(text, maxLength = 220) {
+  const compact = String(text || '').replace(/\s+/g, ' ').trim();
+  if (compact.length <= maxLength) return compact;
+  return `${compact.slice(0, maxLength)}...`;
+}
+
+function isLikelyHtmlResponse(text) {
+  const value = String(text || '').trim();
+  if (!value) return false;
+  return /^<!doctype html/i.test(value) || /^<html[\s>]/i.test(value) || value.includes('__next_error__');
+}
+
 async function requestStubSmsApi(baseUrl, apiKey, action, params = {}, timeoutMs = 25000) {
   const endpoint = normalizeBaseUrl(baseUrl, '');
   if (!endpoint) {
@@ -2515,8 +2954,9 @@ async function requestStubSmsApi(baseUrl, apiKey, action, params = {}, timeoutMs
   }
 }
 
-async function requestFiveSimApi(apiKey, method, endpoint, params = {}, timeoutMs = 25000) {
-  const url = new URL(`https://5sim.net/v1/${String(endpoint || '').replace(/^\//, '')}`);
+async function requestFiveSimApi(baseUrl, apiKey, method, endpoint, params = {}, timeoutMs = 25000) {
+  const normalizedBaseUrl = normalizeFiveSimBaseUrl(baseUrl, FIVESIM_DEFAULT_BASE_URL);
+  const url = new URL(`${normalizedBaseUrl}/${String(endpoint || '').replace(/^\//, '')}`);
   for (const [key, value] of Object.entries(params || {})) {
     if (value === null || value === undefined) continue;
     const textValue = String(value).trim();
@@ -2533,9 +2973,31 @@ async function requestFiveSimApi(apiKey, method, endpoint, params = {}, timeoutM
       },
       credentials: 'omit',
     }, timeoutMs);
-    const data = parseJsonSafe(text);
+    const responseText = String(text || '').trim();
+    const data = parseJsonSafe(responseText);
+    const contentType = String(response.headers.get('content-type') || '').toLowerCase();
     const ok = response.status >= 200 && response.status < 300;
-    return { ok, text: String(text || '').trim(), data, status: response.status };
+
+    if (isLikelyHtmlResponse(responseText)) {
+      const preview = compactTextForLog(responseText, 160);
+      return {
+        ok: false,
+        text: `5SIM returned HTML page (status=${response.status}, content-type=${contentType || 'unknown'}, baseUrl=${normalizedBaseUrl}). Usually wrong API base URL / Cloudflare challenge / network interception. body=${preview}`,
+        data: null,
+        status: response.status,
+      };
+    }
+
+    if (!data && responseText && !contentType.includes('application/json')) {
+      return {
+        ok: false,
+        text: `5SIM returned non-JSON response (status=${response.status}, content-type=${contentType || 'unknown'}, baseUrl=${normalizedBaseUrl}): ${compactTextForLog(responseText, 180)}`,
+        data: null,
+        status: response.status,
+      };
+    }
+
+    return { ok, text: responseText, data, status: response.status };
   } catch (err) {
     return { ok: false, text: `REQUEST_ERROR:${err.message}`, data: null, status: 0 };
   }
@@ -2784,34 +3246,48 @@ async function heroPollCode(state, activationId) {
   return '';
 }
 
-async function fiveSimSetStatus(apiKey, action, orderId) {
+async function fiveSimSetStatus(state, action, orderId) {
   if (!orderId) return;
-  await requestFiveSimApi(apiKey, 'GET', `user/${action}/${orderId}`, {}, 20000);
+  await requestFiveSimApi(state.fivesimBaseUrl, state.fivesimApiKey, 'GET', `user/${action}/${orderId}`, {}, 20000);
 }
 
-async function fiveSimGetNumber(state) {
+function getFiveSimBuyRequestContext(state) {
+  const mode = normalizeFiveSimMode(state.fivesimMode, FIVESIM_MODE_ACTIVATION);
   const country = String(state.fivesimCountry || DEFAULT_STATE.fivesimCountry).trim() || DEFAULT_STATE.fivesimCountry;
   const service = String(state.fivesimService || 'openai').trim() || 'openai';
   const maxPrice = toNonNegativeNumber(state.fivesimMaxPrice, DEFAULT_STATE.fivesimMaxPrice);
+  const baseUrl = normalizeFiveSimBaseUrl(state.fivesimBaseUrl, FIVESIM_DEFAULT_BASE_URL);
+  const summary = `mode=${mode}, country=${country}, service=${service}, maxPrice=${maxPrice > 0 ? maxPrice : 'unlimited'}, baseUrl=${baseUrl}`;
+  return { mode, country, service, maxPrice, baseUrl, summary };
+}
+
+async function fiveSimGetNumber(state) {
+  const requestContext = getFiveSimBuyRequestContext(state);
+  const { mode, country, service, maxPrice } = requestContext;
   const params = {};
   if (maxPrice > 0) {
     params.maxPrice = maxPrice;
   }
   const response = await requestFiveSimApi(
+    state.fivesimBaseUrl,
     state.fivesimApiKey,
     'GET',
-    `user/buy/activation/${encodeURIComponent(country)}/any/${encodeURIComponent(service)}`,
+    `user/buy/${encodeURIComponent(mode)}/${encodeURIComponent(country)}/any/${encodeURIComponent(service)}`,
     params,
     30000
   );
   if (!response.ok || !response.data || !response.data.id || !response.data.phone) {
-    throw new Error(`5SIM getNumber failed: ${response.text || 'unknown error'}`);
+    const responseText = String(response.text || '');
+    if (/no free phones/i.test(responseText)) {
+      throw new Error(`5SIM无可用号码（${requestContext.summary}）：${responseText}`);
+    }
+    throw new Error(`5SIM getNumber failed (${requestContext.summary}): ${responseText || 'unknown error'}`);
   }
   const orderId = String(response.data.id);
   const price = Number.parseFloat(String(response.data.price ?? ''));
   if (maxPrice > 0 && Number.isFinite(price) && price > maxPrice) {
-    await fiveSimSetStatus(state.fivesimApiKey, 'cancel', orderId);
-    throw new Error(`5SIM 价格拦截：$${price} > 最大单价 $${maxPrice}`);
+    await fiveSimSetStatus(state, 'cancel', orderId);
+    throw new Error(`5SIM 价格拦截（${requestContext.summary}）：$${price} > 最大单价 $${maxPrice}`);
   }
   return {
     orderId,
@@ -2824,7 +3300,14 @@ async function fiveSimPollCode(state, orderId) {
   const startedAt = Date.now();
   while ((Date.now() - startedAt) < timeoutSec * 1000) {
     throwIfStopped();
-    const response = await requestFiveSimApi(state.fivesimApiKey, 'GET', `user/check/${orderId}`, {}, 20000);
+    const response = await requestFiveSimApi(
+      state.fivesimBaseUrl,
+      state.fivesimApiKey,
+      'GET',
+      `user/check/${orderId}`,
+      {},
+      20000
+    );
     const data = response.data && typeof response.data === 'object' ? response.data : null;
 
     if (response.ok && data) {
@@ -2935,6 +3418,8 @@ async function verifyAddPhoneWithHero(state) {
 async function verifyAddPhoneWithFiveSim(state) {
   const maxTries = Math.max(1, toPositiveInteger(state.fivesimMaxTries, 3));
   let lastError = new Error('5SIM verification failed.');
+  const requestContext = getFiveSimBuyRequestContext(state);
+  await addLog(`Step 5: [5SIM] Buy params -> ${requestContext.summary}`, 'info');
   for (let attempt = 1; attempt <= maxTries; attempt++) {
     throwIfStopped();
     let orderId = '';
@@ -2954,14 +3439,14 @@ async function verifyAddPhoneWithFiveSim(state) {
       await addLog(`Step 5: [5SIM] Got SMS code: ${smsCode}`, 'ok');
       const verifyResult = await fillPhoneOtpCode(smsCode);
       if (verifyResult?.verified && verifyResult?.codeFilled) {
-        await fiveSimSetStatus(state.fivesimApiKey, 'finish', orderId);
+        await fiveSimSetStatus(state, 'finish', orderId);
         await addLog('Step 5: [5SIM] Phone verification passed.', 'ok');
         return true;
       }
       throw new Error(verifyResult?.error || 'Phone verification page did not pass after OTP submit/fill.');
     } catch (err) {
       lastError = err instanceof Error ? err : new Error(String(err));
-      await fiveSimSetStatus(state.fivesimApiKey, 'ban', orderId);
+      await fiveSimSetStatus(state, 'ban', orderId);
       await addLog(`Step 5: [5SIM] attempt ${attempt} failed: ${lastError.message}`, 'warn');
     }
   }

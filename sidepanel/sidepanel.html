@@ -59,6 +59,7 @@
         <span class="data-label">邮箱来源</span>
         <select id="select-mail-provider" class="data-select">
           <option value="freemail">Freemail（自建API）</option>
+          <option value="luckmail">Luckmail（API Key）</option>
           <option value="163">163邮箱（mail.163.com）</option>
           <option value="qq">QQ邮箱（wx.mail.qq.com）</option>
           <option value="inbucket">Inbucket（自定义主机）</option>
@@ -134,13 +135,36 @@
         <span class="data-label">5SIM密钥</span>
         <input type="password" id="input-fivesim-key" class="data-input" placeholder="填写 5SIM API 密钥" />
       </div>
+      <div class="data-row" id="row-fivesim-base-url" style="display:none;">
+        <span class="data-label">5SIM接口</span>
+        <input type="text" id="input-fivesim-base-url" class="data-input" placeholder="默认 https://5sim.net/v1" />
+      </div>
+      <div class="data-row" id="row-fivesim-mode" style="display:none;">
+        <span class="data-label">5SIM池类型</span>
+        <select id="select-fivesim-mode" class="data-select">
+          <option value="activation">activation（一次性激活）</option>
+          <option value="hosting">hosting（长期号池）</option>
+        </select>
+      </div>
       <div class="data-row" id="row-fivesim-service" style="display:none;">
         <span class="data-label">5SIM服务码</span>
         <input type="text" id="input-fivesim-service" class="data-input" placeholder="如：openai" />
       </div>
       <div class="data-row" id="row-fivesim-country" style="display:none;">
         <span class="data-label">5SIM国家</span>
-        <input type="text" id="input-fivesim-country" class="data-input" placeholder="默认 vietnam，如：vietnam / usa" />
+        <select id="select-fivesim-country" class="data-select">
+          <option value="vietnam">vietnam</option>
+          <option value="indonesia">indonesia</option>
+          <option value="thailand">thailand</option>
+          <option value="philippines">philippines</option>
+          <option value="malaysia">malaysia</option>
+          <option value="singapore">singapore</option>
+          <option value="india">india</option>
+          <option value="japan">japan</option>
+          <option value="usa">usa</option>
+          <option value="canada">canada</option>
+          <option value="uk">uk</option>
+        </select>
       </div>
       <div class="data-row" id="row-fivesim-max-price" style="display:none;">
         <span class="data-label">5SIM最大单价($)</span>
@@ -173,6 +197,22 @@
       <div class="data-row" id="row-freemail-domain" style="display:none;">
         <span class="data-label">Freemail域名</span>
         <input type="text" id="input-freemail-domain" class="data-input" placeholder="多个域名用英文逗号分隔" />
+      </div>
+      <div class="data-row" id="row-luckmail-base-url" style="display:none;">
+        <span class="data-label">Luckmail接口</span>
+        <input type="text" id="input-luckmail-base-url" class="data-input" placeholder="默认 https://mails.luckyous.com" />
+      </div>
+      <div class="data-row" id="row-luckmail-api-key" style="display:none;">
+        <span class="data-label">Luckmail密钥</span>
+        <input type="password" id="input-luckmail-api-key" class="data-input" placeholder="填写 Luckmail API Key" />
+      </div>
+      <div class="data-row" id="row-luckmail-project-code" style="display:none;">
+        <span class="data-label">Luckmail项目码</span>
+        <input type="text" id="input-luckmail-project-code" class="data-input" placeholder="默认 OpenAi" />
+      </div>
+      <div class="data-row" id="row-luckmail-tag" style="display:none;">
+        <span class="data-label">成功后标签</span>
+        <input type="text" id="input-luckmail-tag" class="data-input" placeholder="默认 used free" />
       </div>
       <div class="data-row">
         <span class="data-label">邮箱</span>

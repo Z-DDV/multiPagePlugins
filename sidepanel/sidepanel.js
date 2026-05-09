@@ -38,6 +38,14 @@ const rowFreemailJwtToken = document.getElementById('row-freemail-jwt-token');
 const inputFreemailJwtToken = document.getElementById('input-freemail-jwt-token');
 const rowFreemailDomain = document.getElementById('row-freemail-domain');
 const inputFreemailDomain = document.getElementById('input-freemail-domain');
+const rowLuckmailBaseUrl = document.getElementById('row-luckmail-base-url');
+const inputLuckmailBaseUrl = document.getElementById('input-luckmail-base-url');
+const rowLuckmailApiKey = document.getElementById('row-luckmail-api-key');
+const inputLuckmailApiKey = document.getElementById('input-luckmail-api-key');
+const rowLuckmailProjectCode = document.getElementById('row-luckmail-project-code');
+const inputLuckmailProjectCode = document.getElementById('input-luckmail-project-code');
+const rowLuckmailTag = document.getElementById('row-luckmail-tag');
+const inputLuckmailTag = document.getElementById('input-luckmail-tag');
 const rowSmsbowerKey = document.getElementById('row-smsbower-key');
 const inputSmsbowerKey = document.getElementById('input-smsbower-key');
 const rowSmsbowerBaseUrl = document.getElementById('row-smsbower-base-url');
@@ -68,10 +76,14 @@ const rowHeroTimeout = document.getElementById('row-hero-timeout');
 const inputHeroTimeout = document.getElementById('input-hero-timeout');
 const rowFivesimKey = document.getElementById('row-fivesim-key');
 const inputFivesimKey = document.getElementById('input-fivesim-key');
+const rowFivesimBaseUrl = document.getElementById('row-fivesim-base-url');
+const inputFivesimBaseUrl = document.getElementById('input-fivesim-base-url');
+const rowFivesimMode = document.getElementById('row-fivesim-mode');
+const selectFivesimMode = document.getElementById('select-fivesim-mode');
 const rowFivesimService = document.getElementById('row-fivesim-service');
 const inputFivesimService = document.getElementById('input-fivesim-service');
 const rowFivesimCountry = document.getElementById('row-fivesim-country');
-const inputFivesimCountry = document.getElementById('input-fivesim-country');
+const selectFivesimCountry = document.getElementById('select-fivesim-country');
 const rowFivesimMaxPrice = document.getElementById('row-fivesim-max-price');
 const inputFivesimMaxPrice = document.getElementById('input-fivesim-max-price');
 const rowFivesimMaxTries = document.getElementById('row-fivesim-max-tries');
@@ -85,8 +97,13 @@ const DEFAULT_MAIL_PROVIDER = 'freemail';
 const DEFAULT_SMS_PROVIDER = 'fivesim';
 const DEFAULT_FREEMAIL_API_URL = 'https://mailfree.zhangbaba520.workers.dev/';
 const DEFAULT_FREEMAIL_DOMAIN = 'mail4.667410.xyz,mail5.667410.xyz,mail6.667410.xyz,mail7.667410.xyz,mail8.667410.xyz,mail9.667410.xyz,mail10.667410.xyz,mail11.667410.xyz,mail12.667410.xyz,baidu.667410.xyz,163.667410.xyz,gmail.667410.xyz,qq.667410.xyz,openai.667410.xyz,runtime.667410.xyz,edu.667410.xyz,google.667410.xyz,apple.667410.xyz,codex.667410.xyz';
+const DEFAULT_LUCKMAIL_BASE_URL = 'https://mails.luckyous.com';
+const DEFAULT_LUCKMAIL_PROJECT_CODE = 'OpenAi';
+const DEFAULT_LUCKMAIL_SUCCESS_TAG = 'used free';
 const DEFAULT_SMSBOWER_MAX_PRICE = 0.08;
 const DEFAULT_HERO_MAX_PRICE = 0.08;
+const DEFAULT_FIVESIM_BASE_URL = 'https://5sim.net/v1';
+const DEFAULT_FIVESIM_MODE = 'activation';
 const DEFAULT_FIVESIM_COUNTRY = 'vietnam';
 const DEFAULT_FIVESIM_MAX_PRICE = 0.15;
 
@@ -165,6 +182,24 @@ async function restoreState() {
     } else {
       inputFreemailDomain.value = DEFAULT_FREEMAIL_DOMAIN;
     }
+    if (state.luckmailBaseUrl) {
+      inputLuckmailBaseUrl.value = state.luckmailBaseUrl;
+    } else {
+      inputLuckmailBaseUrl.value = DEFAULT_LUCKMAIL_BASE_URL;
+    }
+    if (state.luckmailApiKey) {
+      inputLuckmailApiKey.value = state.luckmailApiKey;
+    }
+    if (state.luckmailProjectCode) {
+      inputLuckmailProjectCode.value = state.luckmailProjectCode;
+    } else {
+      inputLuckmailProjectCode.value = DEFAULT_LUCKMAIL_PROJECT_CODE;
+    }
+    if (state.luckmailSuccessTag) {
+      inputLuckmailTag.value = state.luckmailSuccessTag;
+    } else {
+      inputLuckmailTag.value = DEFAULT_LUCKMAIL_SUCCESS_TAG;
+    }
     if (state.smsbowerApiKey) inputSmsbowerKey.value = state.smsbowerApiKey;
     if (state.smsbowerBaseUrl) inputSmsbowerBaseUrl.value = state.smsbowerBaseUrl;
     if (state.smsbowerService) inputSmsbowerService.value = state.smsbowerService;
@@ -188,11 +223,21 @@ async function restoreState() {
     if (state.heroMaxTries !== undefined) inputHeroMaxTries.value = state.heroMaxTries;
     if (state.heroPollTimeoutSec !== undefined) inputHeroTimeout.value = state.heroPollTimeoutSec;
     if (state.fivesimApiKey) inputFivesimKey.value = state.fivesimApiKey;
+    if (state.fivesimBaseUrl) {
+      inputFivesimBaseUrl.value = state.fivesimBaseUrl;
+    } else {
+      inputFivesimBaseUrl.value = DEFAULT_FIVESIM_BASE_URL;
+    }
+    if (state.fivesimMode) {
+      selectFivesimMode.value = state.fivesimMode;
+    } else {
+      selectFivesimMode.value = DEFAULT_FIVESIM_MODE;
+    }
     if (state.fivesimService) inputFivesimService.value = state.fivesimService;
     if (state.fivesimCountry) {
-      inputFivesimCountry.value = state.fivesimCountry;
+      setFivesimCountryValue(state.fivesimCountry);
     } else {
-      inputFivesimCountry.value = DEFAULT_FIVESIM_COUNTRY;
+      setFivesimCountryValue(DEFAULT_FIVESIM_COUNTRY);
     }
     if (state.fivesimMaxPrice !== undefined) {
       inputFivesimMaxPrice.value = state.fivesimMaxPrice;
@@ -227,14 +272,37 @@ function syncPasswordField(state) {
   inputPassword.value = state.customPassword || state.password || '';
 }
 
+function setFivesimCountryValue(country) {
+  const normalized = String(country || '').trim().toLowerCase();
+  if (!normalized) {
+    selectFivesimCountry.value = DEFAULT_FIVESIM_COUNTRY;
+    return;
+  }
+
+  const existingOption = Array.from(selectFivesimCountry.options).find((option) => option.value === normalized);
+  if (!existingOption) {
+    const customOption = document.createElement('option');
+    customOption.value = normalized;
+    customOption.textContent = `${normalized}（自定义）`;
+    selectFivesimCountry.appendChild(customOption);
+  }
+
+  selectFivesimCountry.value = normalized;
+}
+
 function updateMailProviderUI() {
   const useInbucket = selectMailProvider.value === 'inbucket';
   const useFreemail = selectMailProvider.value === 'freemail';
+  const useLuckmail = selectMailProvider.value === 'luckmail';
   rowInbucketHost.style.display = useInbucket ? '' : 'none';
   rowInbucketMailbox.style.display = useInbucket ? '' : 'none';
   rowFreemailApiUrl.style.display = useFreemail ? '' : 'none';
   rowFreemailJwtToken.style.display = useFreemail ? '' : 'none';
   rowFreemailDomain.style.display = useFreemail ? '' : 'none';
+  rowLuckmailBaseUrl.style.display = useLuckmail ? '' : 'none';
+  rowLuckmailApiKey.style.display = useLuckmail ? '' : 'none';
+  rowLuckmailProjectCode.style.display = useLuckmail ? '' : 'none';
+  rowLuckmailTag.style.display = useLuckmail ? '' : 'none';
 }
 
 function updateSmsProviderUI() {
@@ -260,6 +328,8 @@ function updateSmsProviderUI() {
   rowHeroTimeout.style.display = showHero ? '' : 'none';
 
   rowFivesimKey.style.display = showFivesim ? '' : 'none';
+  rowFivesimBaseUrl.style.display = showFivesim ? '' : 'none';
+  rowFivesimMode.style.display = showFivesim ? '' : 'none';
   rowFivesimService.style.display = showFivesim ? '' : 'none';
   rowFivesimCountry.style.display = showFivesim ? '' : 'none';
   rowFivesimMaxPrice.style.display = showFivesim ? '' : 'none';
@@ -602,6 +672,38 @@ inputFreemailDomain.addEventListener('change', async () => {
   });
 });
 
+inputLuckmailBaseUrl.addEventListener('change', async () => {
+  await chrome.runtime.sendMessage({
+    type: 'SAVE_SETTING',
+    source: 'sidepanel',
+    payload: { luckmailBaseUrl: inputLuckmailBaseUrl.value.trim() },
+  });
+});
+
+inputLuckmailApiKey.addEventListener('change', async () => {
+  await chrome.runtime.sendMessage({
+    type: 'SAVE_SETTING',
+    source: 'sidepanel',
+    payload: { luckmailApiKey: inputLuckmailApiKey.value.trim() },
+  });
+});
+
+inputLuckmailProjectCode.addEventListener('change', async () => {
+  await chrome.runtime.sendMessage({
+    type: 'SAVE_SETTING',
+    source: 'sidepanel',
+    payload: { luckmailProjectCode: inputLuckmailProjectCode.value.trim() },
+  });
+});
+
+inputLuckmailTag.addEventListener('change', async () => {
+  await chrome.runtime.sendMessage({
+    type: 'SAVE_SETTING',
+    source: 'sidepanel',
+    payload: { luckmailSuccessTag: inputLuckmailTag.value.trim() },
+  });
+});
+
 inputSmsbowerKey.addEventListener('change', async () => {
   await chrome.runtime.sendMessage({
     type: 'SAVE_SETTING',
@@ -722,6 +824,22 @@ inputFivesimKey.addEventListener('change', async () => {
   });
 });
 
+inputFivesimBaseUrl.addEventListener('change', async () => {
+  await chrome.runtime.sendMessage({
+    type: 'SAVE_SETTING',
+    source: 'sidepanel',
+    payload: { fivesimBaseUrl: inputFivesimBaseUrl.value.trim() },
+  });
+});
+
+selectFivesimMode.addEventListener('change', async () => {
+  await chrome.runtime.sendMessage({
+    type: 'SAVE_SETTING',
+    source: 'sidepanel',
+    payload: { fivesimMode: selectFivesimMode.value },
+  });
+});
+
 inputFivesimService.addEventListener('change', async () => {
   await chrome.runtime.sendMessage({
     type: 'SAVE_SETTING',
@@ -730,11 +848,11 @@ inputFivesimService.addEventListener('change', async () => {
   });
 });
 
-inputFivesimCountry.addEventListener('change', async () => {
+selectFivesimCountry.addEventListener('change', async () => {
   await chrome.runtime.sendMessage({
     type: 'SAVE_SETTING',
     source: 'sidepanel',
-    payload: { fivesimCountry: inputFivesimCountry.value.trim() },
+    payload: { fivesimCountry: selectFivesimCountry.value },
   });
 });
 
